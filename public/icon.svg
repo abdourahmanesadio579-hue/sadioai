@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="cyber-cyan" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <linearGradient id="armor-light" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#cbd5e1"/>
+    </linearGradient>
+    <linearGradient id="armor-dark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="512" height="512" rx="104" fill="url(#bg)"/>
+
+  <!-- Tech Grid Accent Lines -->
+  <circle cx="256" cy="256" r="210" fill="none" stroke="#06b6d4" stroke-width="2" stroke-opacity="0.25" stroke-dasharray="10 15"/>
+  <circle cx="256" cy="256" r="180" fill="none" stroke="#38bdf8" stroke-width="1.5" stroke-opacity="0.3"/>
+
+  <!-- Antenna -->
+  <line x1="256" y1="110" x2="256" y2="70" stroke="#94a3b8" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="256" cy="62" r="14" fill="#06b6d4" filter="url(#glow)"/>
+  <circle cx="256" cy="62" r="6" fill="#e0f2fe"/>
+
+  <!-- Ears / Audio Sensors -->
+  <rect x="110" y="180" width="22" height="58" rx="10" fill="#475569"/>
+  <rect x="116" y="192" width="10" height="34" rx="4" fill="#06b6d4"/>
+  <rect x="380" y="180" width="22" height="58" rx="10" fill="#475569"/>
+  <rect x="386" y="192" width="10" height="34" rx="4" fill="#06b6d4"/>
+
+  <!-- Head Chassis -->
+  <rect x="124" y="120" width="264" height="180" rx="60" fill="url(#armor-light)"/>
+  <path d="M 144 140 Q 256 126 368 140 L 368 160 Q 256 146 144 160 Z" fill="#94a3b8" opacity="0.5"/>
+
+  <!-- Visor / Face Screen -->
+  <rect x="148" y="148" width="216" height="124" rx="36" fill="#090d16" stroke="#334155" stroke-width="4"/>
+
+  <!-- Glowing Robot Eyes / Optics -->
+  <g filter="url(#glow)">
+    <circle cx="204" cy="210" r="26" fill="url(#cyber-cyan)"/>
+    <circle cx="308" cy="210" r="26" fill="url(#cyber-cyan)"/>
+    <circle cx="204" cy="210" r="12" fill="#ffffff"/>
+    <circle cx="308" cy="210" r="12" fill="#ffffff"/>
+    <!-- Iris details -->
+    <path d="M 190 210 A 14 14 0 0 1 218 210" stroke="#0891b2" stroke-width="2" fill="none"/>
+    <path d="M 294 210 A 14 14 0 0 1 322 210" stroke="#0891b2" stroke-width="2" fill="none"/>
+  </g>
+
+  <!-- Animated voice bar / digital smile -->
+  <rect x="230" y="248" width="52" height="6" rx="3" fill="#38bdf8" opacity="0.9" filter="url(#glow)"/>
+
+  <!-- Neck -->
+  <rect x="226" y="300" width="60" height="30" rx="8" fill="#334155"/>
+  <line x1="236" y1="310" x2="276" y2="310" stroke="#06b6d4" stroke-width="3"/>
+  <line x1="236" y1="320" x2="276" y2="320" stroke="#06b6d4" stroke-width="3"/>
+
+  <!-- Torso Upper Part -->
+  <path d="M 150 330 L 362 330 L 390 440 L 122 440 Z" fill="url(#armor-light)"/>
+  <path d="M 190 330 L 322 330 L 302 430 L 210 430 Z" fill="url(#armor-dark)"/>
+
+  <!-- Chest Arc Reactor / AI Core -->
+  <circle cx="256" cy="385" r="32" fill="#0f172a" stroke="#06b6d4" stroke-width="4"/>
+  <circle cx="256" cy="385" r="22" fill="#0284c7" filter="url(#glow)"/>
+  <circle cx="256" cy="385" r="10" fill="#ffffff"/>
+  <polygon points="256,365 264,380 280,385 264,390 256,405 248,390 232,385 248,380" fill="#bae6fd" opacity="0.8"/>
+</svg>

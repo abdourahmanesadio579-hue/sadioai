@@ -1,0 +1,6 @@
+{
+  "name": "RoboOmni - Avatar Robot Intelligent",
+  "description": "PWA de discussion interactive avec un avatar robot debout ultra-intelligent, apportant des réponses claires, détaillées et précises dans tous les domaines.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

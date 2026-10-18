@@ -89,6 +89,7 @@ export default function App() {
   // Warm Greeting on entrance state
   const [isGreeting, setIsGreeting] = useState(true);
   const greetingTriggeredRef = useRef(false);
+  const greetingAudioPlayedRef = useRef(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -224,6 +225,8 @@ export default function App() {
       greetingTriggeredRef.current = true;
 
       if (voiceEnabled && forcePlayAudio) {
+        greetingAudioPlayedRef.current = true;
+        unlockAudioContext();
         setRobotState('speaking');
         speak(GREETING_SPOKEN_TEXT, 'fr-FR', () => {
           setRobotState('idle');
@@ -238,36 +241,47 @@ export default function App() {
         }, 5000);
       }
     },
-    [voiceEnabled, speak]
+    [voiceEnabled, speak, unlockAudioContext]
   );
 
-  // Automatic warm greeting upon entering the app + gesture unlock fallback
+  // Automatic warm greeting upon entering the app + gesture unlock fallback for mobile
   useEffect(() => {
-    // 1. Auto greet when entering
-    const autoGreetTimer = window.setTimeout(() => {
-      if (!greetingTriggeredRef.current) {
-        triggerWarmGreeting(true);
-      }
-    }, 700);
+    const isMobile =
+      typeof navigator !== 'undefined' &&
+      /mobi|iphone|ipad|android|iemobile/i.test(navigator.userAgent);
 
-    // 2. Gesture listener in case the browser blocked audio autoplay on first cold load
+    let autoGreetTimer: number | null = null;
+
+    // On desktop browsers with autoplay permission, attempt auto-greet after 700ms
+    if (!isMobile) {
+      autoGreetTimer = window.setTimeout(() => {
+        if (!greetingAudioPlayedRef.current) {
+          triggerWarmGreeting(true);
+        }
+      }, 700);
+    }
+
+    // On mobile (and when autoplay is blocked): first touch on the screen immediately unlocks and plays greeting!
     const handleFirstGesture = () => {
-      if (!greetingTriggeredRef.current) {
+      unlockAudioContext();
+      if (!greetingAudioPlayedRef.current) {
         triggerWarmGreeting(true);
       }
-      window.removeEventListener('pointerdown', handleFirstGesture);
-      window.removeEventListener('keydown', handleFirstGesture);
     };
 
-    window.addEventListener('pointerdown', handleFirstGesture, { once: true });
-    window.addEventListener('keydown', handleFirstGesture, { once: true });
+    window.addEventListener('pointerdown', handleFirstGesture, { passive: true });
+    window.addEventListener('touchstart', handleFirstGesture, { passive: true });
+    window.addEventListener('click', handleFirstGesture, { passive: true });
+    window.addEventListener('keydown', handleFirstGesture, { passive: true });
 
     return () => {
-      clearTimeout(autoGreetTimer);
+      if (autoGreetTimer) clearTimeout(autoGreetTimer);
       window.removeEventListener('pointerdown', handleFirstGesture);
+      window.removeEventListener('touchstart', handleFirstGesture);
+      window.removeEventListener('click', handleFirstGesture);
       window.removeEventListener('keydown', handleFirstGesture);
     };
-  }, [triggerWarmGreeting]);
+  }, [triggerWarmGreeting, unlockAudioContext]);
 
   // Clean up any old chat history in safeStorage so nothing persists
   useEffect(() => {
@@ -688,9 +702,8 @@ export default function App() {
   };
 
   const handleAvatarInteractiveClick = () => {
-    if (robotState === 'idle' || isGreeting) {
-      triggerWarmGreeting(true);
-    }
+    unlockAudioContext();
+    triggerWarmGreeting(true);
   };
 
   // RENDER: Reusable Chat Input Bar

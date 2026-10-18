@@ -195,29 +195,29 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
           <span className="truncate">{isCurrentlyThinking ? (thinkingCountdown && thinkingCountdown > 0 ? `Sadio réfléchit (${thinkingCountdown}s)...` : 'Sadio est en train de réfléchir...') : statusTextMap[state]}</span>
         </div>
 
-        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+        <div className="flex items-center gap-1.5 shrink-0">
           {onTestVoice && (
             <button
               onClick={onTestVoice}
               title="Tester le son du robot"
-              className="min-h-[36px] px-2 py-1 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white transition-all text-xs font-mono flex items-center gap-1 active:scale-95"
+              className="min-h-[36px] px-2.5 py-1 rounded-xl border border-cyan-500/40 bg-slate-900/90 hover:bg-slate-800 text-cyan-300 hover:text-white transition-all text-xs font-mono flex items-center gap-1.5 active:scale-95 shadow-sm shadow-cyan-500/10"
             >
               <Zap className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="text-[10px] hidden xs:inline">Tester son</span>
+              <span className="text-[11px] font-medium">Tester voix</span>
             </button>
           )}
 
           <button
             onClick={onToggleVoice}
             title={voiceEnabled ? 'Désactiver la voix du robot' : 'Activer la voix parlée du robot'}
-            className={`min-h-[36px] px-2 sm:px-2.5 py-1 rounded-lg border transition-all text-xs flex items-center gap-1 font-mono active:scale-95 ${
+            className={`min-h-[36px] px-2.5 py-1 rounded-xl border transition-all text-xs flex items-center gap-1.5 font-mono active:scale-95 ${
               voiceEnabled
                 ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.4)]'
                 : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-slate-200'
             }`}
           >
             {voiceEnabled ? <Volume2 className="w-3.5 h-3.5 shrink-0" /> : <VolumeX className="w-3.5 h-3.5 shrink-0" />}
-            <span className="text-[10px] hidden xs:inline">{voiceEnabled ? 'Voix ON' : 'Voix OFF'}</span>
+            <span className="text-[11px] font-medium">{voiceEnabled ? 'Voix ON' : 'Voix OFF'}</span>
           </button>
         </div>
       </div>
@@ -297,12 +297,15 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                       e.stopPropagation();
                       onReplayGreeting();
                     }}
-                    className="mt-0.5 w-full py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium text-xs flex items-center justify-center gap-1.5 shadow-md shadow-cyan-500/20 transition-all active:scale-95"
+                    className="mt-1 w-full py-2 px-3 rounded-xl bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/30 transition-all active:scale-95 animate-pulse"
                   >
-                    <Volume2 className="w-3.5 h-3.5" />
-                    <span>Écouter le salut de Sadio</span>
+                    <Volume2 className="w-4 h-4 shrink-0 text-white" />
+                    <span>🔊 Activer la voix de Sadio</span>
                   </button>
                 )}
+                <p className="text-[10px] text-slate-400 text-center font-mono leading-tight">
+                  Conseil mobile : montez le volume média & désactivez le mode silencieux
+                </p>
               </div>
             ) : (
               <div className="flex flex-col gap-2">

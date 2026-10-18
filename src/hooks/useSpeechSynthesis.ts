@@ -102,7 +102,7 @@ export function splitIntoSentences(text: string, maxChunkLength = 320): string[]
   return passages;
 }
 
-// Play a subtle cybernetic audio beep via Web Audio API to unlock audio context
+// Play a subtle cybernetic audio beep via Web Audio API and prime speech synthesis pipeline synchronously
 export function unlockAudioContext(): void {
   try {
     const AudioContextClass =
@@ -126,6 +126,22 @@ export function unlockAudioContext(): void {
     }
   } catch (e) {
     // AudioContext unlock optional
+  }
+
+  // Prime speech synthesis synchronously within this user gesture on mobile browsers
+  try {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+      const prime = new SpeechSynthesisUtterance(' ');
+      prime.volume = 0.01;
+      prime.rate = 1.0;
+      prime.lang = 'fr-FR';
+      window.speechSynthesis.speak(prime);
+    }
+  } catch (e) {
+    // ignore
   }
 }
 
@@ -370,13 +386,20 @@ export function useSpeechSynthesis() {
       }
 
       const utterance = new SpeechSynthesisUtterance(nextText);
-      utterance.lang = 'fr-FR';
+      utterance.lang = selectedVoice?.lang || 'fr-FR';
       utterance.rate = speechRateRef.current;
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
 
       if (selectedVoice) {
         utterance.voice = selectedVoice;
+      }
+
+      // Strong window reference to prevent mobile garbage collector from reaping active utterance
+      if (typeof window !== 'undefined') {
+        const win = window as any;
+        win.__activeSpeechUtterances = win.__activeSpeechUtterances || [];
+        win.__activeSpeechUtterances.push(utterance);
       }
 
       activeUtterancesRef.current.push(utterance);
@@ -415,6 +438,14 @@ export function useSpeechSynthesis() {
           freezeWatchdog = null;
         }
         activeUtterancesRef.current = activeUtterancesRef.current.filter((u) => u !== utterance);
+        if (typeof window !== 'undefined') {
+          const win = window as any;
+          if (win.__activeSpeechUtterances) {
+            win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
+              (u: any) => u !== utterance
+            );
+          }
+        }
 
         if (activeUtterancesRef.current.length === 0 && queueRef.current.length === 0) {
           isVoicingRef.current = false;
@@ -459,6 +490,14 @@ export function useSpeechSynthesis() {
           freezeWatchdog = null;
         }
         activeUtterancesRef.current = activeUtterancesRef.current.filter((u) => u !== utterance);
+        if (typeof window !== 'undefined') {
+          const win = window as any;
+          if (win.__activeSpeechUtterances) {
+            win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
+              (u: any) => u !== utterance
+            );
+          }
+        }
         if (activeUtterancesRef.current.length === 0) {
           isVoicingRef.current = false;
           setIsVoicing(false);
@@ -539,6 +578,17 @@ export function useSpeechSynthesis() {
           synthRef.current.cancel();
           synthRef.current.resume();
         }
+      } catch (e) {
+        // ignore
+      }
+
+      // Prime speech synthesis synchronously within this user gesture to keep audio unlocked on mobile
+      try {
+        const prime = new SpeechSynthesisUtterance(' ');
+        prime.volume = 0.01;
+        prime.rate = 1.0;
+        prime.lang = selectedVoice?.lang || 'fr-FR';
+        synthRef.current.speak(prime);
       } catch (e) {
         // ignore
       }
@@ -635,18 +685,17 @@ export function useSpeechSynthesis() {
         return;
       }
 
-      setTimeout(() => {
-        isCanceledRef.current = false;
-        isPlayingRef.current = false;
-        isStreamingEndedRef.current = true;
-        onEndCallbackRef.current = onEnd || null;
-        queueRef.current = [...sentences];
-        setIsSpeaking(true);
-        setIsPaused(false);
-        setSpeechError(null);
+      // Direct synchronous execution within the user gesture chain (no setTimeout to prevent iOS Safari from blocking playback)
+      isCanceledRef.current = false;
+      isPlayingRef.current = false;
+      isStreamingEndedRef.current = true;
+      onEndCallbackRef.current = onEnd || null;
+      queueRef.current = [...sentences];
+      setIsSpeaking(true);
+      setIsPaused(false);
+      setSpeechError(null);
 
-        playNextInQueue();
-      }, 50);
+      playNextInQueue();
     },
     [playNextInQueue]
   );
@@ -657,7 +706,7 @@ export function useSpeechSynthesis() {
 
   const testVoice = useCallback(() => {
     unlockAudioContext();
-    speak("Bonjour ! Je suis RoboOmni. Vous m'entendez maintenant instantanément dès mes premières paroles !");
+    speak("Bonjour ! Je suis Sadio. Votre voix et vos haut-parleurs sont parfaitement activés !");
   }, [speak]);
 
   return {

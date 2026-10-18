@@ -15,6 +15,8 @@ interface SettingsModalProps {
   selectedVoice?: SpeechSynthesisVoice | null;
   onSelectVoice?: (voice: SpeechSynthesisVoice) => void;
   onTestVoice?: () => void;
+  speechRate?: number;
+  onChangeSpeechRate?: (rate: number) => void;
   messages: ChatMessage[];
   onClearMessages: () => void;
 }
@@ -32,6 +34,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   selectedVoice = null,
   onSelectVoice,
   onTestVoice,
+  speechRate = 1.0,
+  onChangeSpeechRate,
   onClearMessages,
 }) => {
   const [showClearConfirm, setShowClearConfirm] = React.useState(false);
@@ -164,15 +168,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   }}
                   className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
                 >
-                  {availableVoices.map((voice) => (
-                    <option key={voice.name} value={voice.name}>
-                      {voice.name} ({voice.lang})
-                    </option>
-                  ))}
+                  {availableVoices.map((voice) => {
+                    const isGoogle = voice.name.toLowerCase().includes('google');
+                    const isEnhanced =
+                      voice.name.toLowerCase().includes('enhanced') ||
+                      voice.name.toLowerCase().includes('natural') ||
+                      voice.name.toLowerCase().includes('network') ||
+                      voice.name.toLowerCase().includes('neural');
+                    const badge = isGoogle ? '⭐ ' : isEnhanced ? '✨ ' : '';
+                    return (
+                      <option key={voice.name} value={voice.name}>
+                        {badge}{voice.name} ({voice.lang})
+                      </option>
+                    );
+                  })}
                 </select>
                 <p className="text-[10px] text-slate-400 leading-tight">
-                  💡 Vous pouvez choisir ici une autre voix française si celle par défaut vous semble robotique ou étrange.
+                  💡 Astuce mobile : Privilégiez les voix <strong>⭐ Google</strong> ou <strong>✨ Naturelle / Haute fidélité</strong> pour un timbre vocal fluide, naturel et sans effet robotique.
                 </p>
+              </div>
+            )}
+
+            {/* Speed / Débit de parole Selector */}
+            {onChangeSpeechRate && (
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-300 font-medium">Vitesse de parole :</span>
+                  <span className="text-[10px] text-cyan-400 font-mono font-bold">
+                    {Math.round((speechRate || 1.0) * 100)}%
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {[
+                    { rate: 0.9, label: 'Calme & posée' },
+                    { rate: 1.0, label: 'Naturelle (Recommandée)' },
+                    { rate: 1.1, label: 'Dynamique' },
+                  ].map((s) => (
+                    <button
+                      key={s.rate}
+                      type="button"
+                      onClick={() => onChangeSpeechRate(s.rate)}
+                      className={`py-2 px-1.5 rounded-xl text-[11px] font-medium border text-center transition-all ${
+                        Math.abs((speechRate || 1.0) - s.rate) < 0.04
+                          ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 font-bold shadow-sm shadow-cyan-500/20'
+                          : 'bg-slate-900/80 border-slate-700/70 text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
           </div>

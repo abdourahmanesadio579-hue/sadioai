@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { safeStorage } from '../utils/storage';
 
-// Clean markdown and formatting to create crystal-clear spoken French without reading special characters
+// Clean markdown, symbols, emojis, and formatting to create crystal-clear spoken French without reading special characters
 export function cleanTextForSpeech(text: string): string {
   if (!text) return '';
 
@@ -14,7 +14,29 @@ export function cleanTextForSpeech(text: string): string {
   // 2. Links [text](url) -> text
   cleaned = cleaned.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
 
-  // 3. Mathematical expressions & powers before removing symbols
+  // 3. Strip all emojis and pictographs so mobile synthesizers don't read them out loud
+  // (Prevents phones from saying "Main qui fait un signe de la main", "Visage souriant", "Robot", "Étincelles")
+  cleaned = cleaned
+    .replace(/[\u{1F600}-\u{1F64F}]/gu, '')
+    .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')
+    .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')
+    .replace(/[\u{1F700}-\u{1F77F}]/gu, '')
+    .replace(/[\u{1F780}-\u{1F7FF}]/gu, '')
+    .replace(/[\u{1F800}-\u{1F8FF}]/gu, '')
+    .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')
+    .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '')
+    .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '')
+    .replace(/[\u{2600}-\u{26FF}]/gu, '')
+    .replace(/[\u{2700}-\u{27BF}]/gu, '')
+    .replace(/[\u{FE00}-\u{FE0F}]/gu, '')
+    .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '');
+  try {
+    cleaned = cleaned.replace(/\p{Extended_Pictographic}/gu, '');
+  } catch {
+    // fallback above
+  }
+
+  // 4. Mathematical expressions & powers before removing symbols
   cleaned = cleaned.replace(/(\w+)\^2\b/g, '$1 au carré');
   cleaned = cleaned.replace(/(\w+)\^3\b/g, '$1 au cube');
   cleaned = cleaned.replace(/(\w+)\^(\w+)/g, '$1 puissance $2');
@@ -23,38 +45,52 @@ export function cleanTextForSpeech(text: string): string {
   cleaned = cleaned.replace(/&/g, ' et ');
   cleaned = cleaned.replace(/%/g, ' pour cent ');
 
-  // 4. Currency vs LaTeX math dollar signs ($15^2 = 225$ or $100)
+  // 5. Common unit abbreviations for natural spoken French
+  cleaned = cleaned.replace(/(\d+)\s*km\b/gi, '$1 kilomètres');
+  cleaned = cleaned.replace(/(\d+)\s*kg\b/gi, '$1 kilogrammes');
+  cleaned = cleaned.replace(/(\d+)\s*cm\b/gi, '$1 centimètres');
+  cleaned = cleaned.replace(/(\d+)\s*mm\b/gi, '$1 millimètres');
+  cleaned = cleaned.replace(/(\d+)\s*ms\b/gi, '$1 millisecondes');
+
+  // 6. Currency vs LaTeX math dollar/euro signs ($15 or 15$)
   cleaned = cleaned.replace(/\$\s*(\d+(?:[.,]\d+)?)/g, '$1 dollars');
   cleaned = cleaned.replace(/(\d+(?:[.,]\d+)?)\s*\$/g, '$1 dollars');
-  // Strip all remaining dollar signs used as math/formula delimiters
-  cleaned = cleaned.replace(/\$/g, '');
+  cleaned = cleaned.replace(/€\s*(\d+(?:[.,]\d+)?)/g, '$1 euros');
+  cleaned = cleaned.replace(/(\d+(?:[.,]\d+)?)\s*€/g, '$1 euros');
+  cleaned = cleaned.replace(/[$€]/g, '');
 
-  // 5. Headings (#, ##, ###)
+  // 7. Headings (#, ##, ###)
   cleaned = cleaned.replace(/#{1,6}\s*(.*)/g, '$1. ');
 
-  // 6. Bold, italics, and strikethrough markdown
+  // 8. Bold, italics, and strikethrough markdown
   cleaned = cleaned.replace(/\*\*([^*]+)\*\*/g, '$1');
   cleaned = cleaned.replace(/\*([^*]+)\*/g, '$1');
   cleaned = cleaned.replace(/__([^_]+)__/g, '$1');
   cleaned = cleaned.replace(/_([^_]+)_/g, '$1');
   cleaned = cleaned.replace(/~~([^~]+)~~/g, '$1');
 
-  // 7. Bullet lists and numbering
+  // 9. Bullet lists and numbering
   cleaned = cleaned.replace(/^[\s]*[-*+]\s+/gm, ' ');
   cleaned = cleaned.replace(/^[\s]*(\d+)\.\s+/gm, '$1. ');
 
-  // 8. Horizontal rules and table pipes
+  // 10. Horizontal rules and table pipes
   cleaned = cleaned.replace(/---+|===+/g, ' ');
   cleaned = cleaned.replace(/\|/g, ' ');
 
-  // 9. Arrow symbols
+  // 11. Arrow symbols
   cleaned = cleaned.replace(/->|→|⇒/g, ' mène à ');
   cleaned = cleaned.replace(/<-|←|⇐/g, ' provient de ');
 
-  // 10. ELIMINATE ALL REMAINING SPECIAL SYMBOLS that speech synthesizers enounce out loud
-  // Specifically: * (astérisque), $ (dollar), # (dièse), _ (souligné), ~ (tilde), ^ (chapeau),
-  // \ (antislash), { } [ ] < > ` | @
-  cleaned = cleaned.replace(/[*#_~^\\{}[\]<>`|@]/g, ' ');
+  // 12. Quotation marks and parentheses: replace with natural pauses rather than spoken punctuation
+  // (Prevents synthesizer from saying "guillemet", "parenthèse ouvrante", etc.)
+  cleaned = cleaned.replace(/[«»"“”„]/g, ' ');
+  cleaned = cleaned.replace(/\s*\(\s*/g, ', ');
+  cleaned = cleaned.replace(/\s*\)\s*/g, ', ');
+
+  // 13. ELIMINATE ALL REMAINING SPECIAL SYMBOLS that speech synthesizers enounce out loud
+  // Specifically: * (astérisque), # (dièse), _ (souligné), ~ (tilde), ^ (chapeau),
+  // \ (antislash), { } [ ] < > ` | @ =
+  cleaned = cleaned.replace(/[*#_~^\\{}[\]<>`|@=]/g, ' ');
 
   // 11. Normalize spaces and punctuation for natural speech cadence
   cleaned = cleaned
@@ -67,12 +103,10 @@ export function cleanTextForSpeech(text: string): string {
   return cleaned;
 }
 
-// Split text into natural, cohesive speech passages (up to ~320 chars) keeping sentences intact.
-// Periods (.) inside a passage produce only a light, natural breath pause (~180ms)
-// instead of causing the browser audio engine to halt and create a long silence.
-export function splitIntoSentences(text: string, maxChunkLength = 320): string[] {
+// Split text into natural, melodic French sentences with human cadence
+export function splitIntoSentences(text: string, maxChunkLength = 140): string[] {
   // Avoid splitting inside numbers like 3.14 or abbreviations
-  const rawSentences = text.match(/[^.!?…]+(?:(?<!\d)[.!?…]+(?!\d)|$)/g);
+  const rawSentences = text.match(/[^.!?…\n]+(?:(?<!\d)[.!?…]+(?!\d)|$)/g);
   if (!rawSentences) return [text.trim()];
 
   const sentences = rawSentences
@@ -102,7 +136,7 @@ export function splitIntoSentences(text: string, maxChunkLength = 320): string[]
   return passages;
 }
 
-// Play a subtle cybernetic audio beep via Web Audio API and prime speech synthesis pipeline synchronously
+// Unlock audio context and prime speech synthesis pipeline silently without acoustic artifacts
 export function unlockAudioContext(): void {
   try {
     const AudioContextClass =
@@ -113,16 +147,12 @@ export function unlockAudioContext(): void {
       if (ctx.state === 'suspended') {
         ctx.resume();
       }
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(520, ctx.currentTime);
-      gain.gain.setValueAtTime(0.01, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.08);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.08);
+      // 1-sample silent buffer primes iOS Safari & Android audio output hardware cleanly without any beep sound
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
     }
   } catch (e) {
     // AudioContext unlock optional
@@ -152,13 +182,34 @@ export function useSpeechSynthesis() {
   const [currentSentence, setCurrentSentence] = useState<string>('');
   const [speechError, setSpeechError] = useState<string | null>(null);
 
-  // Speech rate set to 1.0x standard rate
-  const [speechRate] = useState<number>(1.0);
-  const speechRateRef = useRef<number>(1.0);
+  // Natural French rhythm (1.0x standard tempo for optimal acoustic fidelity and zero resampling distortion)
+  const [speechRate, setSpeechRateState] = useState<number>(() => {
+    try {
+      const saved = safeStorage.getItem('sadio_speech_rate_v2');
+      if (saved) {
+        const parsed = parseFloat(saved);
+        if (!isNaN(parsed) && parsed >= 0.75 && parsed <= 1.3) return parsed;
+      }
+      return 1.0;
+    } catch {
+      return 1.0;
+    }
+  });
+  const speechRateRef = useRef<number>(speechRate);
 
-  useEffect(() => {
-    safeStorage.removeItem('robo_omni_speech_rate');
-  }, []);
+  const [speechPitch, setSpeechPitchState] = useState<number>(() => {
+    try {
+      const saved = safeStorage.getItem('sadio_speech_pitch_v2');
+      if (saved) {
+        const parsed = parseFloat(saved);
+        if (!isNaN(parsed) && parsed >= 0.8 && parsed <= 1.2) return parsed;
+      }
+      return 1.0;
+    } catch {
+      return 1.0;
+    }
+  });
+  const speechPitchRef = useRef<number>(speechPitch);
 
   const synthRef = useRef<SpeechSynthesis | null>(null);
   const queueRef = useRef<string[]>([]);
@@ -241,61 +292,91 @@ export function useSpeechSynthesis() {
         const voices = synth.getVoices();
         if (voices.length > 0) {
           // Strictly detect genuine French voices (fr-FR, fr_FR, fra, fre, French, Français)
-          const frenchVoices = voices.filter((v) => {
+          // Exclude foreign language voices that merely contain "french" in their name (e.g. English voices with French accent)
+          const genuineFrenchVoices = voices.filter((v) => {
             const lang = (v.lang || '').toLowerCase().replace('_', '-');
+            if (
+              lang.startsWith('en') ||
+              lang.startsWith('es') ||
+              lang.startsWith('de') ||
+              lang.startsWith('it') ||
+              lang.startsWith('pt') ||
+              lang.startsWith('zh') ||
+              lang.startsWith('ja') ||
+              lang.startsWith('ar')
+            ) {
+              return false;
+            }
+            if (lang.startsWith('fr') || lang.startsWith('fra') || lang.startsWith('fre')) {
+              return true;
+            }
             const name = (v.name || '').toLowerCase();
-            return (
-              lang.startsWith('fr') ||
-              lang.startsWith('fra') ||
-              name.includes('français') ||
-              name.includes('francais') ||
-              name.includes('french')
-            );
+            return !lang && (name.includes('français') || name.includes('francais'));
           });
 
           // Only expose genuine French voices to availableVoices
-          setAvailableVoices(frenchVoices.length > 0 ? frenchVoices : []);
+          setAvailableVoices(genuineFrenchVoices.length > 0 ? genuineFrenchVoices : []);
 
           let bestVoice: SpeechSynthesisVoice | null = null;
 
-          if (frenchVoices.length > 0) {
-            // Rank 1: Neural / Google / Premium / Natural French voices
-            bestVoice =
-              frenchVoices.find((v) => {
-                const n = v.name.toLowerCase();
-                return (
-                  n.includes('google') ||
-                  n.includes('natural') ||
-                  n.includes('neural') ||
-                  n.includes('enhanced') ||
-                  n.includes('premium') ||
-                  n.includes('wavenet')
-                );
-              }) ||
-              // Rank 2: High quality named human French voices (Thomas, Amélie, Audrey, Nicolas)
-              frenchVoices.find((v) => {
-                const n = v.name.toLowerCase();
-                return (
-                  n.includes('thomas') ||
-                  n.includes('amélie') ||
-                  n.includes('amelie') ||
-                  n.includes('audrey') ||
-                  n.includes('aurelie') ||
-                  n.includes('céline') ||
-                  n.includes('celine') ||
-                  n.includes('nicolas')
-                );
-              }) ||
-              // Rank 3: French (France)
-              frenchVoices.find((v) => (v.lang || '').toLowerCase().replace('_', '-') === 'fr-fr') ||
-              // Rank 4: Any French voice
-              frenchVoices[0] ||
-              null;
+          // Check if user previously saved a preferred voice in Settings
+          const savedVoiceName = safeStorage.getItem('sadio_voice_name_v2');
+          if (savedVoiceName && genuineFrenchVoices.length > 0) {
+            bestVoice = genuineFrenchVoices.find((v) => v.name === savedVoiceName) || null;
           }
 
-          // CRITICAL: If no French voice was reported by getVoices(), NEVER assign an English voice!
-          // Leaving selectedVoice as null causes utterance.voice to be undefined, which directs
-          // the mobile OS TTS engine to synthesize using its default French model based on utterance.lang = 'fr-FR'.
+          if (!bestVoice && genuineFrenchVoices.length > 0) {
+            // Priority to Standard France French (fr-FR) over Canadian (fr-CA) or regional dialects
+            const frFrVoices = genuineFrenchVoices.filter((v) => {
+              const lang = (v.lang || '').toLowerCase().replace('_', '-');
+              return lang.startsWith('fr-fr') || lang === 'fr';
+            });
+            const voicesToSearch = frFrVoices.length > 0 ? frFrVoices : genuineFrenchVoices;
+
+            // Rank 1: High definition Google French (Android/Chrome flagship) & Apple Enhanced/Natural/Premium (iOS)
+            bestVoice =
+              voicesToSearch.find((v) => {
+                const n = v.name.toLowerCase();
+                return (
+                  n.includes('google français') ||
+                  n.includes('google francais') ||
+                  (n.includes('google') && n.includes('fr')) ||
+                  n.includes('network') || // High-definition Android Google neural network voice (e.g. fr-fr-x-fra-network)
+                  n.includes('enhanced') || // High-definition Apple iOS neural voice
+                  n.includes('premium') ||
+                  n.includes('natural') ||
+                  n.includes('neural') ||
+                  n.includes('wavenet') ||
+                  n.includes('siri')
+                );
+              }) ||
+              // Rank 2: High quality named human France voices (Thomas, Audrey, Aurélie, Nicolas) without "(compact)" or "(local)"
+              voicesToSearch.find((v) => {
+                const n = v.name.toLowerCase();
+                const isNamed =
+                  n.includes('thomas') ||
+                  n.includes('audrey') ||
+                  n.includes('aurelie') ||
+                  n.includes('aurélie') ||
+                  n.includes('nicolas') ||
+                  n.includes('hortense') ||
+                  n.includes('paul') ||
+                  n.includes('julie');
+                return isNamed && !n.includes('compact') && !n.includes('local');
+              }) ||
+              // Rank 3: Any non-compact fr-FR voice
+              voicesToSearch.find((v) => {
+                const n = v.name.toLowerCase();
+                return !n.includes('compact') && !n.includes('local');
+              }) ||
+              // Rank 4: Standard fr-FR voice
+              frFrVoices[0] ||
+              // Rank 5: Any French voice
+              genuineFrenchVoices[0];
+          }
+
+          // If no French voice was reported by getVoices(), leave as null so the OS TTS engine
+          // synthesizes using its default French model based on utterance.lang = 'fr-FR'.
           setSelectedVoice(bestVoice);
         }
       };
@@ -431,8 +512,8 @@ export function useSpeechSynthesis() {
 
     const utterance = new SpeechSynthesisUtterance(nextText);
     utterance.lang = selectedVoice?.lang || 'fr-FR';
-    utterance.rate = speechRateRef.current;
-    utterance.pitch = 1.0;
+    utterance.rate = speechRateRef.current || 1.0;
+    utterance.pitch = speechPitchRef.current || 1.0;
     utterance.volume = 1.0;
 
     // Only assign selectedVoice if it is a validated French voice
@@ -697,13 +778,34 @@ export function useSpeechSynthesis() {
     [playNextInQueue]
   );
 
-  const setSpeechRate = useCallback((_newRate: number) => {
-    speechRateRef.current = 1.0;
+  const setSpeechRate = useCallback((newRate: number) => {
+    const rate = Math.max(0.75, Math.min(1.3, newRate));
+    speechRateRef.current = rate;
+    setSpeechRateState(rate);
+    safeStorage.setItem('sadio_speech_rate_v2', rate.toString());
+  }, []);
+
+  const setSpeechPitch = useCallback((newPitch: number) => {
+    const pitch = Math.max(0.8, Math.min(1.2, newPitch));
+    speechPitchRef.current = pitch;
+    setSpeechPitchState(pitch);
+    safeStorage.setItem('sadio_speech_pitch_v2', pitch.toString());
+  }, []);
+
+  const setSelectedVoiceAndPersist = useCallback((voice: SpeechSynthesisVoice | null) => {
+    setSelectedVoice(voice);
+    if (voice) {
+      safeStorage.setItem('sadio_voice_name_v2', voice.name);
+      safeStorage.setItem('sadio_voice_lang_v2', voice.lang);
+    } else {
+      safeStorage.removeItem('sadio_voice_name_v2');
+      safeStorage.removeItem('sadio_voice_lang_v2');
+    }
   }, []);
 
   const testVoice = useCallback(() => {
     unlockAudioContext();
-    speak("Bonjour ! Je suis Sadio. Votre voix et vos haut-parleurs sont parfaitement activés !");
+    speak("Bonjour ! Je suis Sadio. Ma voix est désormais claire, fluide et naturelle.");
   }, [speak]);
 
   return {
@@ -716,9 +818,11 @@ export function useSpeechSynthesis() {
     setVoiceEnabled,
     speechRate,
     setSpeechRate,
+    speechPitch,
+    setSpeechPitch,
     availableVoices,
     selectedVoice,
-    setSelectedVoice,
+    setSelectedVoice: setSelectedVoiceAndPersist,
     currentSentence,
     speechError,
     startStreamingSpeech,

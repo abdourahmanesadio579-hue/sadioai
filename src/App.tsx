@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 
 const GREETING_SPOKEN_TEXT =
-  "Bonjour et bienvenue ! Je suis Sadio, votre avatar intelligent. C'est un réel plaisir de vous accueillir ! Je me tiens debout au centre de votre écran, entièrement prêt à explorer tous les domaines avec vous. Comment puis-je vous aider aujourd'hui ?";
+  "Bonjour et bienvenue ! Je suis Sadio, votre robot intelligent. C'est un réel plaisir de vous accueillir. Je suis prêt pour toutes vos questions. Comment puis-je vous aider aujourd'hui ?";
 
 const INITIAL_BOT_MESSAGE: ChatMessage = {
   id: 'init-msg-1',
@@ -530,20 +530,12 @@ export default function App() {
                       let sentenceMatch: RegExpMatchArray | null = null;
 
                       if (spokenCharIndex === 0) {
-                        // 1. FAST ONSET: Start speaking on the first short sentence or clause (~30-80 chars)
+                        // 1. FAST ONSET: Start speaking on the first complete short sentence (~20-90 chars)
                         sentenceMatch = unparsed.match(/^([\s\S]{15,90}?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
-                        if (!sentenceMatch && unparsed.length >= 35) {
-                          const firstClauseMatch = unparsed.match(/^([\s\S]{15,75}?(?:[,:;]|\n))\s*/);
-                          if (firstClauseMatch && firstClauseMatch[1].trim().length >= 10) {
-                            sentenceMatch = firstClauseMatch;
-                          }
-                        }
                       } else {
-                        // 2. CONTINUOUS SPEECH: Group sentences into passages of 160-320 chars so that
-                        // periods (.) remain INSIDE the spoken passage with a light, natural breath pause (~180ms)
-                        // rather than halting the audio pipeline at every single period.
-                        if (unparsed.length >= 160) {
-                          sentenceMatch = unparsed.match(/^([\s\S]{140,320}?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
+                        // 2. CONTINUOUS SPEECH: Group sentences into passages of 120-260 chars for natural cadence
+                        if (unparsed.length >= 140) {
+                          sentenceMatch = unparsed.match(/^([\s\S]{120,260}?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
                         } else if (unparsed.includes('\n\n')) {
                           sentenceMatch = unparsed.match(/^([\s\S]+?\n\n+)(?:\s+|$)/);
                         } else if (!isSpeaking) {
@@ -559,7 +551,7 @@ export default function App() {
 
                         let cleanSentence = cleanTextForSpeech(matchedChunk).trim();
                         if (cleanSentence.length > 0) {
-                          if (!/[.!?…,:;]$/.test(cleanSentence)) {
+                          if (!/[.!?…]$/.test(cleanSentence)) {
                             cleanSentence += '.';
                           }
                           enqueueStreamingSentence(cleanSentence);

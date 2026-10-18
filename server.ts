@@ -5,7 +5,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import crypto from 'crypto';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import {
   loadDatabase,
   createUser,
@@ -63,29 +63,18 @@ DIRECTIVES FONDAMENTALES OBLIGATOIRES :
    - Privilégie une rédaction fluide qui s'entend aussi bien qu'elle se lit.`;
 
 function getAIClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
   });
 }
 
-// Sanitize conversation history for Gemini API:
-// 1. Removes empty turns and error messages
-// 2. Ensures turn 0 is strictly 'user'
-// 3. Merges consecutive same-role turns
-// 4. Ensures the last turn is 'user'
 function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: string }>) {
   if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
     return [];
   }
 
-  // Filter valid texts and remove internal system errors from history
   const clean: Array<{ role: string; content: string }> = [];
   for (const m of rawMessages) {
     if (m && typeof m.content === 'string') {
@@ -102,10 +91,8 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
 
   if (clean.length === 0) return [];
 
-  // Find first user message
   const firstUserIdx = clean.findIndex((m) => m.role === 'user');
   if (firstUserIdx === -1) {
-    // If only model messages were found, convert the last message into a user query
     const lastMsg = clean[clean.length - 1];
     return [{ role: 'user' as const, parts: [{ text: lastMsg.content }] }];
   }
@@ -118,7 +105,6 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
     const text = m.content.trim();
 
     if (formatted.length > 0 && formatted[formatted.length - 1].role === role) {
-      // Merge consecutive same-role messages
       formatted[formatted.length - 1].parts[0].text += '\n\n' + text;
     } else {
       formatted.push({
@@ -128,7 +114,6 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
     }
   }
 
-  // Ensure last turn is 'user'
   while (formatted.length > 0 && formatted[formatted.length - 1].role !== 'user') {
     formatted.pop();
   }
@@ -140,7 +125,6 @@ async function startServer() {
   loadDatabase();
   const app = express();
 
-  // Capture rawBody for cryptographic webhook signature verification
   app.use(
     express.json({
       limit: '10mb',
@@ -150,7 +134,6 @@ async function startServer() {
     })
   );
 
-  // Helper to extract bearer token from Authorization header
   const getAuthToken = (req: Request): string => {
     const auth = req.headers.authorization || '';
     if (auth.startsWith('Bearer ')) {
@@ -159,9 +142,8 @@ async function startServer() {
     return (req.query.token as string) || '';
   };
 
-  // Health check endpoint
   app.get('/api/health', (_req: Request, res: Response) => {
-    const hasKey = Boolean(process.env.GEMINI_API_KEY);
+    const hasKey = Boolean(process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY);
     res.json({
       status: 'ok',
       hasApiKey: hasKey,
@@ -169,11 +151,6 @@ async function startServer() {
     });
   });
 
-  /* =====================================================================
-     AUTHENTICATION & 3-DAY (72-HOUR) FREE TRIAL ENDPOINTS
-     ===================================================================== */
-
-  // POST /api/auth/register: Create user and start 72-hour trial in server UTC
   app.post('/api/auth/register', (req: Request, res: Response) => {
     try {
       const { email, password, name } = req.body;
@@ -208,7 +185,6 @@ async function startServer() {
     }
   });
 
-  // POST /api/auth/login: Authenticate user
   app.post('/api/auth/login', (req: Request, res: Response) => {
     try {
       const { email, password } = req.body;
@@ -239,7 +215,6 @@ async function startServer() {
     }
   });
 
-  // GET /api/auth/me: Verify current session and compute access status
   app.get('/api/auth/me', (req: Request, res: Response) => {
     const token = getAuthToken(req);
     if (!token) {
@@ -285,7 +260,6 @@ async function startServer() {
     });
   });
 
-  // POST /api/auth/logout
   app.post('/api/auth/logout', (req: Request, res: Response) => {
     const token = getAuthToken(req);
     if (token) {
@@ -294,11 +268,6 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  /* =====================================================================
-     BICTORYS SUBSCRIPTION (700 FCFA / 30 DAYS) & WEBHOOK ENDPOINTS
-     ===================================================================== */
-
-  // POST /api/subscription/create-checkout: Initiates Bictorys 700 XOF payment
   app.post('/api/subscription/create-checkout', async (req: Request, res: Response) => {
     try {
       const token = getAuthToken(req);
@@ -313,7 +282,6 @@ async function startServer() {
         return;
       }
 
-      // Security: amount 700 XOF strictly enforced on server
       const AMOUNT = 700;
       const CURRENCY = 'XOF';
       const paymentReference = `SADIO-700-${Date.now()}-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
@@ -333,7 +301,6 @@ async function startServer() {
         cancelUrl,
       });
 
-      // Record transaction as pending
       createTransaction({
         userId: user.id,
         userEmail: user.email,
@@ -359,7 +326,6 @@ async function startServer() {
     }
   });
 
-  // GET /api/subscription/check-payment/:reference: Polling status endpoint
   app.get('/api/subscription/check-payment/:reference', (req: Request, res: Response) => {
     const reference = req.params.reference;
     const tx = getTransactionByReference(reference);
@@ -383,7 +349,6 @@ async function startServer() {
     });
   });
 
-  // POST /api/subscription/webhook: Official Bictorys Webhook Notification Handler
   app.post('/api/subscription/webhook', (req: Request, res: Response) => {
     try {
       const config = getBictorysConfig();
@@ -393,7 +358,6 @@ async function startServer() {
         req.headers['x-webhook-signature'] ||
         req.headers['x-secret-key']) as string | undefined;
 
-      // 1. Authenticity verification
       if (config.webhookSecret) {
         const isValid = verifyBictorysWebhookSignature(rawBody, signatureHeader, config.webhookSecret);
         if (!isValid) {
@@ -403,7 +367,6 @@ async function startServer() {
         }
       }
 
-      // 2. Parse payload safely
       const payload = req.body || {};
       const eventData = payload.data || payload;
       const paymentReference = eventData.paymentReference || eventData.reference || payload.paymentReference;
@@ -418,14 +381,12 @@ async function startServer() {
         return;
       }
 
-      // 3. Idempotency Check: protect against repeated webhook notifications
       const eventKey = `${paymentReference}_${status}`;
       if (isWebhookProcessed(eventKey)) {
         res.status(200).json({ received: true, alreadyProcessed: true });
         return;
       }
 
-      // 4. Verify payment outcome and strict 700 XOF compliance
       if (status === 'SUCCESSFUL' || status === 'COMPLETED' || status === 'PAID') {
         if (amount > 0 && amount !== 700) {
           console.error(`Montant incorrect reçu pour la référence ${paymentReference}: ${amount} XOF (requis: 700 XOF)`);
@@ -439,7 +400,6 @@ async function startServer() {
           return;
         }
 
-        // Activate 30-day subscription safely without duplicating days
         const result = activateSubscriptionFromPayment(paymentReference, {
           chargeId,
           paymentMethod,
@@ -468,7 +428,6 @@ async function startServer() {
     }
   });
 
-  // POST /api/subscription/simulate-sandbox-payment: Instant test endpoint for Sandbox/development
   app.post('/api/subscription/simulate-sandbox-payment', (req: Request, res: Response) => {
     const { paymentReference, paymentMethod } = req.body;
     if (!paymentReference) {
@@ -495,142 +454,8 @@ async function startServer() {
     });
   });
 
-  // GET /checkout/bictorys-sandbox: Interactive Checkout Test Portal
-  app.get('/checkout/bictorys-sandbox', (req: Request, res: Response) => {
-    const ref = (req.query.ref as string) || '';
-    const email = (req.query.email as string) || 'client@example.com';
-    const amount = req.query.amount || '700';
-    const currency = req.query.currency || 'XOF';
-
-    res.send(`<!DOCTYPE html>
-<html lang="fr">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bictorys Checkout - Paiement Sécurisé</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-</head>
-<body class="bg-slate-950 text-slate-100 min-h-screen flex items-center justify-center p-4">
-  <div class="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 space-y-6">
-    <div class="flex items-center justify-between border-b border-slate-800 pb-4">
-      <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-cyan-500/20 border border-cyan-400/40 flex items-center justify-center font-bold text-cyan-400">B</div>
-        <div>
-          <h1 class="font-bold text-sm tracking-wide text-white">Bictorys Checkout</h1>
-          <p class="text-[10px] text-cyan-400 font-medium">Portail de Paiement Sécurisé</p>
-        </div>
-      </div>
-      <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 border border-amber-500/30 text-amber-300">Sandbox Test</span>
-    </div>
-
-    <div class="bg-slate-950/70 border border-slate-800 rounded-xl p-4 text-center space-y-1">
-      <div class="text-[11px] text-slate-400 uppercase font-semibold">Montant à régler</div>
-      <div class="text-3xl font-extrabold text-cyan-400 tracking-tight">${amount} ${currency}</div>
-      <div class="text-xs text-slate-300 font-medium pt-1">Accès 30 jours illimités à SADIO AI</div>
-      <div class="text-[10px] text-slate-500 font-mono pt-1">Réf : ${ref}</div>
-    </div>
-
-    <div class="space-y-3">
-      <label class="text-xs font-semibold text-slate-300 block">Choisissez votre moyen de paiement :</label>
-      <div class="grid grid-cols-2 gap-2.5 text-xs">
-        <label class="flex items-center gap-2.5 p-3 rounded-xl border border-cyan-500/40 bg-cyan-500/10 cursor-pointer">
-          <input type="radio" name="payment_method" value="WAVE" checked class="text-cyan-500">
-          <div>
-            <div class="font-bold text-cyan-300">Wave</div>
-            <div class="text-[10px] text-slate-400">Sénégal & CI</div>
-          </div>
-        </label>
-        <label class="flex items-center gap-2.5 p-3 rounded-xl border border-slate-800 bg-slate-950/50 hover:border-slate-700 cursor-pointer">
-          <input type="radio" name="payment_method" value="ORANGE_MONEY" class="text-cyan-500">
-          <div>
-            <div class="font-bold text-orange-400">Orange Money</div>
-            <div class="text-[10px] text-slate-400">OM Pay</div>
-          </div>
-        </label>
-        <label class="flex items-center gap-2.5 p-3 rounded-xl border border-slate-800 bg-slate-950/50 hover:border-slate-700 cursor-pointer">
-          <input type="radio" name="payment_method" value="FREE_MONEY" class="text-cyan-500">
-          <div>
-            <div class="font-bold text-rose-400">Free Money</div>
-            <div class="text-[10px] text-slate-400">Mobile Money</div>
-          </div>
-        </label>
-        <label class="flex items-center gap-2.5 p-3 rounded-xl border border-slate-800 bg-slate-950/50 hover:border-slate-700 cursor-pointer">
-          <input type="radio" name="payment_method" value="CARD_VISA" class="text-cyan-500">
-          <div>
-            <div class="font-bold text-blue-400">Carte Visa / MC</div>
-            <div class="text-[10px] text-slate-400">Carte bancaire</div>
-          </div>
-        </label>
-      </div>
-    </div>
-
-    <div class="space-y-1.5">
-      <label class="text-xs font-semibold text-slate-300 block">Numéro mobile / Compte</label>
-      <input type="tel" value="+221 77 000 00 00" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400">
-      <p class="text-[10px] text-slate-500">Compte associé : ${email}</p>
-    </div>
-
-    <div class="space-y-2 pt-2">
-      <button id="payBtn" onclick="simulatePay()" class="w-full py-3 rounded-xl font-bold text-sm bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 shadow-lg shadow-cyan-500/20 transition active:scale-[0.99] flex items-center justify-center gap-2">
-        <span>Confirmer et Payer ${amount} ${currency}</span>
-      </button>
-      <a href="/?payment_status=cancel&ref=${ref}" class="block text-center text-xs text-slate-400 hover:text-slate-200 py-1 transition">
-        Annuler la transaction
-      </a>
-    </div>
-
-    <div id="statusBox" class="hidden p-3 rounded-xl text-center text-xs"></div>
-  </div>
-
-  <script>
-    async function simulatePay() {
-      const btn = document.getElementById('payBtn');
-      const box = document.getElementById('statusBox');
-      const method = document.querySelector('input[name="payment_method"]:checked')?.value || 'WAVE';
-      
-      btn.disabled = true;
-      btn.innerText = 'Traitement en cours...';
-      
-      try {
-        const res = await fetch('/api/subscription/simulate-sandbox-payment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            paymentReference: '${ref}',
-            paymentMethod: method,
-          })
-        });
-        const data = await res.json();
-        
-        if (data.success) {
-          box.className = 'p-3 rounded-xl text-center text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-bold';
-          box.innerText = 'Paiement confirmé avec succès ! Redirection vers SADIO AI...';
-          box.classList.remove('hidden');
-          setTimeout(() => {
-            window.location.href = '/?payment_status=success&ref=${ref}';
-          }, 1500);
-        } else {
-          throw new Error(data.error || 'Échec du paiement.');
-        }
-      } catch (e) {
-        btn.disabled = false;
-        btn.innerText = 'Réessayer';
-        box.className = 'p-3 rounded-xl text-center text-xs bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold';
-        box.innerText = e.message;
-        box.classList.remove('hidden');
-      }
-    }
-  </script>
-</body>
-</html>`);
-  });
-
-  /* =====================================================================
-     PROTECTED CHAT COMPLETION (AI RUNTIME ENFORCEMENT)
-     ===================================================================== */
-
+  // EXCLUSIVE GEMINI BRAIN CHAT ENDPOINT
   app.post('/api/chat', async (req: Request, res: Response) => {
-    // 1. Optional session identification
     const token = getAuthToken(req);
     let user: UserRecord | null = null;
     let access: ReturnType<typeof computeUserAccess> | null = null;
@@ -650,49 +475,56 @@ async function startServer() {
     }
 
     const ai = getAIClient();
-    if (!ai) {
-      res.status(503).json({
-        error: 'Service Gemini indisponible.',
-        message: 'La clé GEMINI_API_KEY est manquante. Veuillez renseigner votre clé dans les secrets.',
-      });
-      return;
-    }
-
-    const contents = sanitizeMessagesForGemini(messages);
-    if (contents.length === 0) {
-      res.status(400).json({ error: 'Aucun message utilisateur valide à traiter.' });
-      return;
-    }
-
-    // Set headers for Server-Sent Events (SSE)
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
 
-    // Heartbeat every 2.5 seconds to keep proxies from dropping connections
+    if (!ai) {
+      res.write(
+        `data: ${JSON.stringify({
+          error: `⚠️ Clé GEMINI_API_KEY manquante. Pour que Google Gemini soit le cerveau de Sadio, veuillez configurer la variable d'environnement GEMINI_API_KEY dans votre tableau de bord d'hébergement.`,
+        })}\n\n`
+      );
+      res.end();
+      return;
+    }
+
+    const contents = sanitizeMessagesForGemini(messages);
+    if (contents.length === 0) {
+      res.write(
+        `data: ${JSON.stringify({
+          error: `Aucun message utilisateur valide à traiter par Gemini.`,
+        })}\n\n`
+      );
+      res.end();
+      return;
+    }
+
     const heartbeat = setInterval(() => {
       if (!res.writableEnded) {
         res.write(': keepalive\n\n');
       }
     }, 2500);
 
-    const systemInstruction = customInstructions
-      ? `${DEFAULT_SYSTEM_INSTRUCTION}\n\nContexte thématique prioritaire : ${customInstructions}`
-      : DEFAULT_SYSTEM_INSTRUCTION;
-
-    // Clean up heartbeat when client disconnects
     res.on('close', () => {
       clearInterval(heartbeat);
     });
 
+    const systemInstruction = customInstructions
+      ? `${DEFAULT_SYSTEM_INSTRUCTION}\n\nContexte thématique prioritaire : ${customInstructions}`
+      : DEFAULT_SYSTEM_INSTRUCTION;
+
     const candidateModels = [
       'gemini-3.8-flash',
       'gemini-flash-latest',
+      'gemini-2.5-flash',
       'gemini-3.1-flash-lite',
     ];
+
     let streamedSuccessfully = false;
+    let lastErrorMsg = '';
 
     for (const modelName of candidateModels) {
       if (res.destroyed || res.writableEnded) break;
@@ -711,9 +543,7 @@ async function startServer() {
         });
 
         for await (const chunk of responseStream) {
-          if (res.destroyed || res.writableEnded) {
-            break;
-          }
+          if (res.destroyed || res.writableEnded) break;
           if (chunk.text) {
             res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
             (res as any).flush?.();
@@ -727,14 +557,15 @@ async function startServer() {
         }
         streamedSuccessfully = true;
         break;
-      } catch (err: unknown) {
-        console.warn(`Streaming failed on model ${modelName}, trying next fallback:`, err);
+      } catch (err: any) {
+        lastErrorMsg = err?.message || String(err);
+        console.warn(`Gemini streaming failed on model ${modelName}:`, err);
       }
     }
 
     if (streamedSuccessfully) return;
 
-    // Fallback: non-streaming attempt if streaming failed
+    // Non-streaming fallback attempt with Gemini
     try {
       const fallbackResponse = await ai.models.generateContent({
         model: 'gemini-3.8-flash',
@@ -754,20 +585,20 @@ async function startServer() {
         res.end();
         return;
       }
-    } catch (fallbackError: unknown) {
-      console.error('All model attempts failed:', fallbackError);
+    } catch (fallbackError: any) {
+      lastErrorMsg = fallbackError?.message || String(fallbackError);
+      console.error('All Gemini attempts failed:', fallbackError);
     }
 
     clearInterval(heartbeat);
     res.write(
       `data: ${JSON.stringify({
-        error: `Mes relais neuronaux sont temporairement surchargés. Veuillez renouveler votre question d'ici un instant.`,
+        error: `Erreur du cerveau Gemini : ${lastErrorMsg || 'Impossible de joindre les serveurs Google Gemini.'}`,
       })}\n\n`
     );
     res.end();
   });
 
-  // Setup Vite in development or static serve in production
   if (!isProduction && fs.existsSync(path.resolve(__dirname, 'index.html'))) {
     const vite = await createViteServer({
       server: { middlewareMode: true, host: '0.0.0.0', port: PORT },

@@ -148,7 +148,7 @@ export default function App() {
 
     if (status === 'success') {
       setPaymentBannerMessage('Paiement confirmé ! Votre abonnement de 30 jours à SADIO AI est désormais actif.');
-      const savedToken = localStorage.getItem('sadio_auth_token');
+      const savedToken = safeStorage.getItem('sadio_auth_token');
       if (savedToken) {
         fetch('/api/auth/me', {
           headers: { Authorization: `Bearer ${savedToken}` },

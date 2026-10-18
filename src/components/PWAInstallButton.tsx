@@ -5,6 +5,7 @@ import { Download, Share2, PlusSquare, X, CheckCircle2 } from 'lucide-react';
 export const PWAInstallButton: React.FC = () => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIOSGuide, setShowIOSGuide] = useState(false);
+  const [showGenericGuide, setShowGenericGuide] = useState(false);
 
   // If already running as an installed PWA, hide the button
   if (isInstalled) {
@@ -90,8 +91,6 @@ export const PWAInstallButton: React.FC = () => {
   }
 
   // Fallback generic install button if neither fired yet
-  const [showGenericGuide, setShowGenericGuide] = useState(false);
-
   return (
     <>
       <button

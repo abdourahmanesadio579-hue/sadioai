@@ -124,6 +124,16 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
 async function startServer() {
   loadDatabase();
   const app = express();
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(200);
+      return;
+    }
+    next();
+  });
 
   app.use(
     express.json({
@@ -517,9 +527,9 @@ async function startServer() {
       : DEFAULT_SYSTEM_INSTRUCTION;
 
     const candidateModels = [
-      'gemini-3.8-flash',
       'gemini-flash-latest',
       'gemini-2.5-flash',
+      'gemini-3.8-flash',
       'gemini-3.1-flash-lite',
     ];
 

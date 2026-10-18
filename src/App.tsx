@@ -142,6 +142,20 @@ export default function App() {
     }
   }, []);
 
+  // Check server health and API key presence on mount
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && data.hasApiKey === false) {
+          setChatErrorMessage(
+            "⚠️ Clé GEMINI_API_KEY manquante sur le serveur. Veuillez configurer la variable d'environnement GEMINI_API_KEY dans votre tableau de bord Render.com."
+          );
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   // Handle Bictorys payment return URL (?payment_status=success or ?payment_status=cancel)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);

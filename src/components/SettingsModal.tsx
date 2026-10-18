@@ -147,26 +147,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               </button>
             )}
 
-            {/* Select Voice Dropdown if multiple voices available */}
+            {/* Select Voice Dropdown - Strictly French voices */}
             {availableVoices.length > 0 && onSelectVoice && (
-              <div className="p-2.5 rounded-xl bg-slate-950/40 border border-slate-800 space-y-1">
-                <span className="text-[11px] text-slate-400 block font-medium">Voix système détectée :</span>
+              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-300 font-medium">Voix française de Sadio :</span>
+                  <span className="text-[10px] text-cyan-400 font-mono">
+                    {selectedVoice ? 'Française' : 'Par défaut'}
+                  </span>
+                </div>
                 <select
                   value={selectedVoice?.name || ''}
                   onChange={(e) => {
                     const chosen = availableVoices.find((v) => v.name === e.target.value);
                     if (chosen) onSelectVoice(chosen);
                   }}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
                 >
-                  {availableVoices
-                    .filter((v) => v.lang.startsWith('fr') || v.lang.startsWith('en'))
-                    .map((voice) => (
-                      <option key={voice.name} value={voice.name}>
-                        {voice.name} ({voice.lang})
-                      </option>
-                    ))}
+                  {availableVoices.map((voice) => (
+                    <option key={voice.name} value={voice.name}>
+                      {voice.name} ({voice.lang})
+                    </option>
+                  ))}
                 </select>
+                <p className="text-[10px] text-slate-400 leading-tight">
+                  💡 Vous pouvez choisir ici une autre voix française si celle par défaut vous semble robotique ou étrange.
+                </p>
               </div>
             )}
           </div>

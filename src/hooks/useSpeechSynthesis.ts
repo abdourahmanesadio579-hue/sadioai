@@ -128,17 +128,12 @@ export function unlockAudioContext(): void {
     // AudioContext unlock optional
   }
 
-  // Prime speech synthesis synchronously within this user gesture on mobile browsers
+  // Resume speech synthesis if paused
   try {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       if (window.speechSynthesis.paused) {
         window.speechSynthesis.resume();
       }
-      const prime = new SpeechSynthesisUtterance(' ');
-      prime.volume = 0.01;
-      prime.rate = 1.0;
-      prime.lang = 'fr-FR';
-      window.speechSynthesis.speak(prime);
     }
   } catch (e) {
     // ignore
@@ -245,31 +240,62 @@ export function useSpeechSynthesis() {
       const updateVoices = () => {
         const voices = synth.getVoices();
         if (voices.length > 0) {
-          setAvailableVoices(voices);
+          // Strictly detect genuine French voices (fr-FR, fr_FR, fra, fre, French, Français)
+          const frenchVoices = voices.filter((v) => {
+            const lang = (v.lang || '').toLowerCase().replace('_', '-');
+            const name = (v.name || '').toLowerCase();
+            return (
+              lang.startsWith('fr') ||
+              lang.startsWith('fra') ||
+              name.includes('français') ||
+              name.includes('francais') ||
+              name.includes('french')
+            );
+          });
 
-          // Find French voices
-          const frenchVoices = voices.filter((v) => v.lang.toLowerCase().startsWith('fr'));
+          // Only expose genuine French voices to availableVoices
+          setAvailableVoices(frenchVoices.length > 0 ? frenchVoices : []);
 
-          // Choose the most natural sounding voice available
-          const bestVoice =
-            frenchVoices.find(
-              (v) =>
-                v.name.includes('Google') ||
-                v.name.includes('Natural') ||
-                v.name.includes('Premium')
-            ) ||
-            frenchVoices.find(
-              (v) =>
-                v.name.includes('Thomas') ||
-                v.name.includes('Amélie') ||
-                v.name.includes('Audrey') ||
-                v.name.includes('Céline')
-            ) ||
-            frenchVoices[0] ||
-            voices.find((v) => v.default) ||
-            voices[0] ||
-            null;
+          let bestVoice: SpeechSynthesisVoice | null = null;
 
+          if (frenchVoices.length > 0) {
+            // Rank 1: Neural / Google / Premium / Natural French voices
+            bestVoice =
+              frenchVoices.find((v) => {
+                const n = v.name.toLowerCase();
+                return (
+                  n.includes('google') ||
+                  n.includes('natural') ||
+                  n.includes('neural') ||
+                  n.includes('enhanced') ||
+                  n.includes('premium') ||
+                  n.includes('wavenet')
+                );
+              }) ||
+              // Rank 2: High quality named human French voices (Thomas, Amélie, Audrey, Nicolas)
+              frenchVoices.find((v) => {
+                const n = v.name.toLowerCase();
+                return (
+                  n.includes('thomas') ||
+                  n.includes('amélie') ||
+                  n.includes('amelie') ||
+                  n.includes('audrey') ||
+                  n.includes('aurelie') ||
+                  n.includes('céline') ||
+                  n.includes('celine') ||
+                  n.includes('nicolas')
+                );
+              }) ||
+              // Rank 3: French (France)
+              frenchVoices.find((v) => (v.lang || '').toLowerCase().replace('_', '-') === 'fr-fr') ||
+              // Rank 4: Any French voice
+              frenchVoices[0] ||
+              null;
+          }
+
+          // CRITICAL: If no French voice was reported by getVoices(), NEVER assign an English voice!
+          // Leaving selectedVoice as null causes utterance.voice to be undefined, which directs
+          // the mobile OS TTS engine to synthesize using its default French model based on utterance.lang = 'fr-FR'.
           setSelectedVoice(bestVoice);
         }
       };
@@ -362,7 +388,7 @@ export function useSpeechSynthesis() {
     }
   }, [isPaused]);
 
-  // Play next sentence from queue with native pipeline pre-buffering
+  // Play next sentence from queue cleanly one utterance at a time
   const playNextInQueue = useCallback(() => {
     if (isCanceledRef.current || !synthRef.current) {
       isPlayingRef.current = false;
@@ -373,176 +399,12 @@ export function useSpeechSynthesis() {
       return;
     }
 
-    // Keep up to 2 utterances active in the browser's speech synthesis queue (1 currently playing + 1 pre-buffered)
-    // This allows the browser audio engine to transition without any teardown delay, producing only a light, natural pause at '.'
-    while (queueRef.current.length > 0 && activeUtterancesRef.current.length < 2) {
-      const nextText = queueRef.current.shift()!;
-      isPlayingRef.current = true;
-      setCurrentSentence(nextText);
-      setIsSpeaking(true);
-
-      if (synthRef.current.paused) {
-        synthRef.current.resume();
-      }
-
-      const utterance = new SpeechSynthesisUtterance(nextText);
-      utterance.lang = selectedVoice?.lang || 'fr-FR';
-      utterance.rate = speechRateRef.current;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
-
-      if (selectedVoice) {
-        utterance.voice = selectedVoice;
-      }
-
-      // Strong window reference to prevent mobile garbage collector from reaping active utterance
-      if (typeof window !== 'undefined') {
-        const win = window as any;
-        win.__activeSpeechUtterances = win.__activeSpeechUtterances || [];
-        win.__activeSpeechUtterances.push(utterance);
-      }
-
-      activeUtterancesRef.current.push(utterance);
-
-      let didStart = false;
-      let freezeWatchdog: ReturnType<typeof setTimeout> | null = null;
-
-      utterance.onstart = () => {
-        didStart = true;
-        if (freezeWatchdog) {
-          clearTimeout(freezeWatchdog);
-          freezeWatchdog = null;
-        }
-        isVoicingRef.current = true;
-        setIsVoicing(true);
-        setIsSpeaking(true);
-        setIsPaused(false);
-        setSpeechError(null);
-        setCurrentSentence(nextText);
-        lastWordBoundaryRef.current = performance.now();
-        if (onStartPlaybackRef.current) {
-          onStartPlaybackRef.current();
-          onStartPlaybackRef.current = null;
-        }
-      };
-
-      utterance.onboundary = (e) => {
-        if (e.name === 'word') {
-          lastWordBoundaryRef.current = performance.now();
-        }
-      };
-
-      utterance.onend = () => {
-        if (freezeWatchdog) {
-          clearTimeout(freezeWatchdog);
-          freezeWatchdog = null;
-        }
-        activeUtterancesRef.current = activeUtterancesRef.current.filter((u) => u !== utterance);
-        if (typeof window !== 'undefined') {
-          const win = window as any;
-          if (win.__activeSpeechUtterances) {
-            win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
-              (u: any) => u !== utterance
-            );
-          }
-        }
-
-        if (activeUtterancesRef.current.length === 0 && queueRef.current.length === 0) {
-          isVoicingRef.current = false;
-          setIsVoicing(false);
-          mouthOpenRef.current = 0;
-          setMouthOpenLevel(0);
-        }
-
-        // Pipelining: immediately feed the next utterance from queue
-        if (!isCanceledRef.current) {
-          playNextInQueue();
-        }
-
-        if (activeUtterancesRef.current.length === 0 && queueRef.current.length === 0 && isStreamingEndedRef.current) {
-          isPlayingRef.current = false;
-          setIsSpeaking(false);
-          setIsPaused(false);
-          setCurrentSentence('');
-          if (onEndCallbackRef.current) {
-            onEndCallbackRef.current();
-            onEndCallbackRef.current = null;
-          }
-        }
-      };
-
-      utterance.onpause = () => {
-        isVoicingRef.current = false;
-        setIsVoicing(false);
-        setIsPaused(true);
-      };
-
-      utterance.onresume = () => {
-        isVoicingRef.current = true;
-        setIsVoicing(true);
-        setIsPaused(false);
-        lastWordBoundaryRef.current = performance.now();
-      };
-
-      utterance.onerror = (e) => {
-        if (freezeWatchdog) {
-          clearTimeout(freezeWatchdog);
-          freezeWatchdog = null;
-        }
-        activeUtterancesRef.current = activeUtterancesRef.current.filter((u) => u !== utterance);
-        if (typeof window !== 'undefined') {
-          const win = window as any;
-          if (win.__activeSpeechUtterances) {
-            win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
-              (u: any) => u !== utterance
-            );
-          }
-        }
-        if (activeUtterancesRef.current.length === 0) {
-          isVoicingRef.current = false;
-          setIsVoicing(false);
-          mouthOpenRef.current = 0;
-          setMouthOpenLevel(0);
-        }
-        console.warn('SpeechSynthesis error event:', e);
-
-        if (e.error === 'not-allowed') {
-          setSpeechError("L'audio a été bloqué par le navigateur. Cliquez sur l'écran pour autoriser le son.");
-          isPlayingRef.current = false;
-          setIsSpeaking(false);
-          setCurrentSentence('');
-        } else if (e.error !== 'interrupted' && e.error !== 'canceled') {
-          playNextInQueue();
-        } else {
-          isPlayingRef.current = false;
-        }
-      };
-
-      try {
-        if (synthRef.current.paused) {
-          synthRef.current.resume();
-        }
-        synthRef.current.speak(utterance);
-        if (synthRef.current.paused) {
-          synthRef.current.resume();
-        }
-        freezeWatchdog = setTimeout(() => {
-          if (!didStart && synthRef.current && isPlayingRef.current) {
-            try {
-              synthRef.current.pause();
-              synthRef.current.resume();
-            } catch {
-              // ignore
-            }
-          }
-        }, 120);
-      } catch (err) {
-        if (freezeWatchdog) clearTimeout(freezeWatchdog);
-        console.error('Error invoking synth.speak:', err);
-      }
+    // Strictly process one utterance at a time to prevent audio glitching and bizarre voice overlaps on mobile
+    if (activeUtterancesRef.current.length > 0) {
+      return;
     }
 
-    if (activeUtterancesRef.current.length === 0 && queueRef.current.length === 0) {
+    if (queueRef.current.length === 0) {
       isPlayingRef.current = false;
       isVoicingRef.current = false;
       setIsVoicing(false);
@@ -555,6 +417,146 @@ export function useSpeechSynthesis() {
           onEndCallbackRef.current = null;
         }
       }
+      return;
+    }
+
+    const nextText = queueRef.current.shift()!;
+    isPlayingRef.current = true;
+    setCurrentSentence(nextText);
+    setIsSpeaking(true);
+
+    if (synthRef.current.paused) {
+      synthRef.current.resume();
+    }
+
+    const utterance = new SpeechSynthesisUtterance(nextText);
+    utterance.lang = selectedVoice?.lang || 'fr-FR';
+    utterance.rate = speechRateRef.current;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    // Only assign selectedVoice if it is a validated French voice
+    if (selectedVoice) {
+      utterance.voice = selectedVoice;
+    }
+
+    // Strong window reference to prevent mobile garbage collector from reaping active utterance
+    if (typeof window !== 'undefined') {
+      const win = window as any;
+      win.__activeSpeechUtterances = win.__activeSpeechUtterances || [];
+      win.__activeSpeechUtterances.push(utterance);
+    }
+
+    activeUtterancesRef.current = [utterance];
+
+    utterance.onstart = () => {
+      isVoicingRef.current = true;
+      setIsVoicing(true);
+      setIsSpeaking(true);
+      setIsPaused(false);
+      setSpeechError(null);
+      setCurrentSentence(nextText);
+      lastWordBoundaryRef.current = performance.now();
+      if (onStartPlaybackRef.current) {
+        onStartPlaybackRef.current();
+        onStartPlaybackRef.current = null;
+      }
+    };
+
+    utterance.onboundary = (e) => {
+      if (e.name === 'word') {
+        lastWordBoundaryRef.current = performance.now();
+      }
+    };
+
+    utterance.onend = () => {
+      activeUtterancesRef.current = [];
+      if (typeof window !== 'undefined') {
+        const win = window as any;
+        if (win.__activeSpeechUtterances) {
+          win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
+            (u: any) => u !== utterance
+          );
+        }
+      }
+
+      if (queueRef.current.length === 0) {
+        isVoicingRef.current = false;
+        setIsVoicing(false);
+        mouthOpenRef.current = 0;
+        setMouthOpenLevel(0);
+      }
+
+      // Immediately play next queued sentence
+      if (!isCanceledRef.current) {
+        playNextInQueue();
+      }
+
+      if (queueRef.current.length === 0 && isStreamingEndedRef.current) {
+        isPlayingRef.current = false;
+        setIsSpeaking(false);
+        setIsPaused(false);
+        setCurrentSentence('');
+        if (onEndCallbackRef.current) {
+          onEndCallbackRef.current();
+          onEndCallbackRef.current = null;
+        }
+      }
+    };
+
+    utterance.onpause = () => {
+      isVoicingRef.current = false;
+      setIsVoicing(false);
+      setIsPaused(true);
+    };
+
+    utterance.onresume = () => {
+      isVoicingRef.current = true;
+      setIsVoicing(true);
+      setIsPaused(false);
+      lastWordBoundaryRef.current = performance.now();
+    };
+
+    utterance.onerror = (e) => {
+      activeUtterancesRef.current = [];
+      if (typeof window !== 'undefined') {
+        const win = window as any;
+        if (win.__activeSpeechUtterances) {
+          win.__activeSpeechUtterances = win.__activeSpeechUtterances.filter(
+            (u: any) => u !== utterance
+          );
+        }
+      }
+      if (queueRef.current.length === 0) {
+        isVoicingRef.current = false;
+        setIsVoicing(false);
+        mouthOpenRef.current = 0;
+        setMouthOpenLevel(0);
+      }
+      console.warn('SpeechSynthesis error event:', e);
+
+      if (e.error === 'not-allowed') {
+        setSpeechError("L'audio a été bloqué par le navigateur. Cliquez sur l'écran pour autoriser le son.");
+        isPlayingRef.current = false;
+        setIsSpeaking(false);
+        setCurrentSentence('');
+      } else if (e.error !== 'interrupted' && e.error !== 'canceled') {
+        playNextInQueue();
+      } else {
+        isPlayingRef.current = false;
+      }
+    };
+
+    try {
+      if (synthRef.current.paused) {
+        synthRef.current.resume();
+      }
+      synthRef.current.speak(utterance);
+      if (synthRef.current.paused) {
+        synthRef.current.resume();
+      }
+    } catch (err) {
+      console.error('Error invoking synth.speak:', err);
     }
   }, [selectedVoice]);
 
@@ -578,17 +580,6 @@ export function useSpeechSynthesis() {
           synthRef.current.cancel();
           synthRef.current.resume();
         }
-      } catch (e) {
-        // ignore
-      }
-
-      // Prime speech synthesis synchronously within this user gesture to keep audio unlocked on mobile
-      try {
-        const prime = new SpeechSynthesisUtterance(' ');
-        prime.volume = 0.01;
-        prime.rate = 1.0;
-        prime.lang = selectedVoice?.lang || 'fr-FR';
-        synthRef.current.speak(prime);
       } catch (e) {
         // ignore
       }
@@ -666,12 +657,18 @@ export function useSpeechSynthesis() {
         synthRef.current.resume();
       }
 
-      isCanceledRef.current = true;
+      if (synthRef.current.speaking || synthRef.current.pending) {
+        try {
+          synthRef.current.cancel();
+        } catch {
+          // ignore
+        }
+      }
+      isCanceledRef.current = false;
       isPlayingRef.current = false;
       isStreamingEndedRef.current = true;
       queueRef.current = [];
       activeUtterancesRef.current = [];
-      synthRef.current.cancel();
 
       const cleaned = cleanTextForSpeech(rawText);
       if (!cleaned) {

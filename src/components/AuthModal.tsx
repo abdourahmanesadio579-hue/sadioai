@@ -78,10 +78,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           </h2>
           <p className="text-xs text-slate-400 max-w-sm mx-auto">
             {mode === 'register'
-              ? 'Activez votre essai gratuit de 3 jours (72 heures) pour poser vos questions au robot sans restriction.'
-              : 'Accédez à votre compte pour retrouver vos conversations et continuer vos échanges.'}
+              ? 'Activez votre essai gratuit de 3 jours (72h) pour poser vos questions sans restriction.'
+              : 'Accédez à votre compte pour continuer vos échanges.'}
           </p>
         </div>
+
+        {/* Mode Selector Tabs */}
+        <div className="flex p-1 bg-slate-950/80 rounded-xl border border-slate-800">
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setMode('register');
+            }}
+            className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
+              mode === 'register'
+                ? 'bg-cyan-500 text-slate-950 shadow-md font-bold'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🎁 Essai 3 jours gratuit
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              setMode('login');
+            }}
+            className={`flex-1 py-2 text-xs font-semibold rounded-lg transition-all ${
+              mode === 'login'
+                ? 'bg-cyan-500 text-slate-950 shadow-md font-bold'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            🔑 Déjà un compte (Se connecter)
+          </button>
+        </div>
+
 
         {/* Commercial Highlights for Registration */}
         {mode === 'register' && (

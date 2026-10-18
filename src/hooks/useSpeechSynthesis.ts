@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { safeStorage } from '../utils/storage';
 
 // Clean markdown and formatting to create crystal-clear spoken French without reading special characters
 export function cleanTextForSpeech(text: string): string {
@@ -145,11 +146,7 @@ export function useSpeechSynthesis() {
   const speechRateRef = useRef<number>(1.0);
 
   useEffect(() => {
-    try {
-      localStorage.removeItem('robo_omni_speech_rate');
-    } catch {
-      // ignore
-    }
+    safeStorage.removeItem('robo_omni_speech_rate');
   }, []);
 
   const synthRef = useRef<SpeechSynthesis | null>(null);

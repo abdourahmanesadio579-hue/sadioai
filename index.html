@@ -35,7 +35,42 @@
     <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   </head>
   <body class="bg-[#070b14] text-slate-100 font-sans antialiased selection:bg-cyan-500/30 selection:text-cyan-200 overflow-hidden">
-    <div id="root"></div>
+    <div id="root">
+      <div style="height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #070b14; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; text-align: center; padding: 20px;">
+        <div style="position: relative; width: 68px; height: 68px; display: flex; align-items: center; justify-content: center; margin-bottom: 20px;">
+          <div style="position: absolute; inset: 0; border-radius: 50%; border: 2px solid rgba(6, 182, 212, 0.2); border-top-color: #06b6d4; animation: sadio-spin 1s linear infinite;"></div>
+          <svg style="width: 34px; height: 34px; color: #22d3ee;" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 2v2m0 16v2m-8-10H2m20 0h-2m-2.93-6.07l-1.41 1.41M6.34 17.66l-1.41 1.41m0-14.14l1.41 1.41m11.32 11.32l1.41 1.41M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+        </div>
+        <h1 style="margin: 0; font-size: 20px; font-weight: 700; letter-spacing: 0.05em; color: #ffffff;">SADIO AI</h1>
+        <p id="initial-loader-text" style="margin: 8px 0 16px; font-size: 13px; color: #94a3b8; max-width: 280px; line-height: 1.4;">Initialisation de l'avatar et connexion au serveur...</p>
+        <div style="width: 140px; height: 3px; background: rgba(51, 65, 85, 0.5); border-radius: 99px; overflow: hidden;">
+          <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #06b6d4, #3b82f6); animation: sadio-pulse 1.5s ease-in-out infinite;"></div>
+        </div>
+        <style>
+          @keyframes sadio-spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+          @keyframes sadio-pulse { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+        </style>
+      </div>
+    </div>
+    <script>
+      // Clear any broken cached service workers from older builds on mobile
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          for (var i = 0; i < regs.length; i++) {
+            regs[i].update();
+          }
+        });
+      }
+      // Safety net: if scripts fail to load, provide immediate reset button
+      window.addEventListener('error', function(e) {
+        var el = document.getElementById('initial-loader-text');
+        if (el && !window.__sadio_mounted) {
+          el.innerHTML = '<span style="color:#fb7185">Interruption de démarrage.</span><br><button onclick="localStorage.clear();if(\'serviceWorker\' in navigator){navigator.serviceWorker.getRegistrations().then(function(r){for(var s of r){s.unregister();}});};window.location.reload(true);" style="margin-top:10px;padding:8px 16px;background:#06b6d4;color:#030712;border:none;border-radius:10px;font-weight:bold;cursor:pointer;">Réinitialiser et recharger</button>';
+        }
+      });
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

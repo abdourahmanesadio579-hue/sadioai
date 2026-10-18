@@ -15,30 +15,35 @@ export function useSpeechRecognition({ onResult }: { onResult: (transcript: stri
     const win = window as unknown as IWindow;
     const SpeechRecognitionClass = win.SpeechRecognition || win.webkitSpeechRecognition;
 
-    if (SpeechRecognitionClass) {
-      setIsSupported(true);
-      const recognition = new SpeechRecognitionClass();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = 'fr-FR';
+    try {
+      if (SpeechRecognitionClass) {
+        setIsSupported(true);
+        const recognition = new SpeechRecognitionClass();
+        recognition.continuous = false;
+        recognition.interimResults = false;
+        recognition.lang = 'fr-FR';
 
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        if (transcript) {
-          onResult(transcript);
-        }
-        setIsListening(false);
-      };
+        recognition.onresult = (event: any) => {
+          const transcript = event.results?.[0]?.[0]?.transcript;
+          if (transcript) {
+            onResult(transcript);
+          }
+          setIsListening(false);
+        };
 
-      recognition.onerror = () => {
-        setIsListening(false);
-      };
+        recognition.onerror = () => {
+          setIsListening(false);
+        };
 
-      recognition.onend = () => {
-        setIsListening(false);
-      };
+        recognition.onend = () => {
+          setIsListening(false);
+        };
 
-      recognitionRef.current = recognition;
+        recognitionRef.current = recognition;
+      }
+    } catch (err) {
+      console.warn('SpeechRecognition initialization skipped or unsupported on this device:', err);
+      setIsSupported(false);
     }
   }, [onResult]);
 

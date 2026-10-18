@@ -18,6 +18,7 @@ import {
   activateSubscriptionFromPayment,
   isWebhookProcessed,
   markWebhookProcessed,
+  UserRecord,
 } from './server/db.js';
 import {
   createBictorysCharge,
@@ -628,38 +629,19 @@ async function startServer() {
      PROTECTED CHAT COMPLETION (AI RUNTIME ENFORCEMENT)
      ===================================================================== */
 
-  // Streaming chat completion endpoint with strict server-side subscription gate
   app.post('/api/chat', async (req: Request, res: Response) => {
-    // 1. Strict Server-Side Access Control (Trial & Subscription Enforcement)
+    // 1. Optional session identification
     const token = getAuthToken(req);
-    if (!token) {
-      res.status(401).json({
-        error: 'AUTH_REQUIRED',
-        message: 'Veuillez créer un compte ou vous connecter pour profiter de vos 3 jours d\'essai gratuit de SADIO AI.',
-      });
-      return;
+    let user: UserRecord | null = null;
+    let access: ReturnType<typeof computeUserAccess> | null = null;
+
+    if (token) {
+      user = getUserByToken(token);
+      if (user) {
+        access = computeUserAccess(user);
+      }
     }
 
-    const user = getUserByToken(token);
-    if (!user) {
-      res.status(401).json({
-        error: 'AUTH_REQUIRED',
-        message: 'Session expirée. Veuillez vous reconnecter.',
-      });
-      return;
-    }
-
-    const access = computeUserAccess(user);
-    if (!access.hasAccess) {
-      res.status(403).json({
-        error: 'SUBSCRIPTION_REQUIRED',
-        message: access.message,
-        status: access.status,
-        trialExpiresAt: user.trial_expires_at,
-        subscriptionExpiresAt: user.subscription_expires_at,
-      });
-      return;
-    }
     const { messages, customInstructions } = req.body;
 
     if (!Array.isArray(messages) || messages.length === 0) {

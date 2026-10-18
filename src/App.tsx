@@ -10,6 +10,7 @@ import { ChatMessage, DomainCategory, RobotState, RobotTheme } from './types/cha
 import { UserProfile, AccessStatus } from './types/auth';
 import { useSpeechSynthesis, cleanTextForSpeech } from './hooks/useSpeechSynthesis';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
+import { safeStorage } from './utils/storage';
 import {
   Send,
   Mic,
@@ -46,36 +47,38 @@ export default function App() {
   const [robotState, setRobotState] = useState<RobotState>('idle');
   const [currentDomain, setCurrentDomain] = useState<DomainCategory>(DOMAINS[0]);
   const [theme, setTheme] = useState<RobotTheme>(() => {
-    return (localStorage.getItem(THEME_KEY) as RobotTheme) || 'cyan';
+    return (safeStorage.getItem(THEME_KEY) as RobotTheme) || 'cyan';
   });
+
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
-  // Pure Voice Mode: Hide response text on screen (Defaults to true as requested by user!)
+  // Pure Voice Mode: Hide response text on screen (defaults to false so user sees answers)
   const [hideResponseText, setHideResponseText] = useState<boolean>(() => {
     try {
-      const saved = localStorage.getItem(HIDE_TEXT_KEY);
+      const saved = safeStorage.getItem(HIDE_TEXT_KEY);
       if (saved !== null) return JSON.parse(saved);
     } catch {
       // ignore
     }
-    return true;
+    return false;
   });
+
+  const [chatErrorMessage, setChatErrorMessage] = useState<string | null>(null);
 
   const toggleHideResponseText = () => {
     setHideResponseText((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem(HIDE_TEXT_KEY, JSON.stringify(next));
+        safeStorage.setItem(HIDE_TEXT_KEY, JSON.stringify(next));
       } catch {
         // ignore
       }
       return next;
     });
   };
-
 
   // 5-second reflection delay state
   const [isThinking, setIsThinking] = useState(false);
@@ -100,11 +103,7 @@ export default function App() {
 
   // Authentication & 3-Day Free Trial State
   const [token, setToken] = useState<string | null>(() => {
-    try {
-      return localStorage.getItem('sadio_auth_token');
-    } catch {
-      return null;
-    }
+    return safeStorage.getItem('sadio_auth_token');
   });
   const [user, setUser] = useState<UserProfile | null>(null);
   const [access, setAccess] = useState<AccessStatus | null>(null);
@@ -112,9 +111,15 @@ export default function App() {
   const [isSubscriptionModalOpen, setIsSubscriptionModalOpen] = useState(false);
   const [paymentBannerMessage, setPaymentBannerMessage] = useState<string | null>(null);
 
-  // Load session or show welcome 3-day trial modal
+  // Free Discovery Demo question for new visitors (enables testing before registering)
+  const [guestQuestionsUsed, setGuestQuestionsUsed] = useState<number>(() => {
+    const saved = safeStorage.getItem('sadio_guest_questions_used');
+    return saved ? parseInt(saved, 10) : 0;
+  });
+
+  // Load session from token
   useEffect(() => {
-    const savedToken = localStorage.getItem('sadio_auth_token');
+    const savedToken = safeStorage.getItem('sadio_auth_token');
     if (savedToken) {
       fetch('/api/auth/me', {
         headers: { Authorization: `Bearer ${savedToken}` },
@@ -126,17 +131,13 @@ export default function App() {
             setAccess(data.access);
             setToken(savedToken);
           } else {
-            localStorage.removeItem('sadio_auth_token');
+            safeStorage.removeItem('sadio_auth_token');
             setToken(null);
             setUser(null);
             setAccess(null);
-            setIsAuthModalOpen(true);
           }
         })
         .catch(() => {});
-    } else {
-      // First visit: show 3-day free trial signup modal
-      setIsAuthModalOpen(true);
     }
   }, []);
 
@@ -179,7 +180,7 @@ export default function App() {
         // ignore
       }
     }
-    localStorage.removeItem('sadio_auth_token');
+    safeStorage.removeItem('sadio_auth_token');
     setToken(null);
     setUser(null);
     setAccess(null);
@@ -268,18 +269,14 @@ export default function App() {
     };
   }, [triggerWarmGreeting]);
 
-  // Clean up any old chat history in localStorage so nothing persists
+  // Clean up any old chat history in safeStorage so nothing persists
   useEffect(() => {
-    try {
-      localStorage.removeItem('robo_omni_chat_history_v2');
-      localStorage.removeItem('robo_omni_chat_history');
-    } catch {
-      // ignore
-    }
+    safeStorage.removeItem('robo_omni_chat_history_v2');
+    safeStorage.removeItem('robo_omni_chat_history');
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(THEME_KEY, theme);
+    safeStorage.setItem(THEME_KEY, theme);
   }, [theme]);
 
   const clearThinkingTimers = () => {
@@ -375,22 +372,10 @@ export default function App() {
     const prompt = (textToSend || input).trim();
     if (!prompt) return;
 
-    // 0. Check authentication before sending
-    if (!token) {
-      setInput('');
-      setIsAuthModalOpen(true);
-      const guestMessage: ChatMessage = {
-        id: `bot-auth-${Date.now()}`,
-        role: 'model',
-        content: `### 🎁 Activez vos 3 jours d'essai gratuit !\n\nPour poser vos questions à **Sadio** et obtenir des réponses complètes et vocalisées, veuillez activer votre essai gratuit de 3 jours.\n\nL'inscription prend 10 secondes, ne nécessite **aucune carte bancaire** et il n'y a **aucun prélèvement automatique**.`,
-        timestamp: Date.now(),
-        domain: 'Essai Gratuit',
-      };
-      setMessages((prev) => [...prev, guestMessage]);
-      return;
-    }
+    setChatErrorMessage(null);
 
-    if (access && !access.hasAccess) {
+    // If subscription is strictly expired for an authenticated user, prompt renewal
+    if (token && access && !access.hasAccess) {
       setInput('');
       setIsSubscriptionModalOpen(true);
       const expiredMessage: ChatMessage = {
@@ -450,12 +435,18 @@ export default function App() {
     }
 
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      } else {
+        headers['x-guest-demo'] = 'true';
+      }
+
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
+        headers,
         body: JSON.stringify({
           messages: newMessages.map((m) => ({
             role: m.role,
@@ -617,6 +608,14 @@ export default function App() {
       setStreamingContent('');
       currentAccumulatedTextRef.current = '';
 
+      // If guest used their discovery demo question, persist count
+      if (!token) {
+        const nextCount = guestQuestionsUsed + 1;
+        setGuestQuestionsUsed(nextCount);
+        safeStorage.setItem('sadio_guest_questions_used', nextCount.toString());
+      }
+
+
       // Enqueue any remaining sentence and finish speech
       if (voiceEnabled) {
         setSpeakingMessageId(botMessageId);
@@ -654,6 +653,8 @@ export default function App() {
         err instanceof Error
           ? err.message
           : 'Une interruption réseau temporaire est survenue.';
+
+      setChatErrorMessage(errorMsg);
 
       const errorBotMessage: ChatMessage = {
         id: `bot-err-${Date.now()}`,
@@ -796,6 +797,31 @@ export default function App() {
           ========================================================================= */}
       <div className="flex-1 flex flex-col items-center w-full max-w-4xl lg:max-w-5xl mx-auto overflow-hidden relative">
 
+        {/* Chat Error Banner if server or API error occurs */}
+        {chatErrorMessage && (
+          <div className="w-full px-3 sm:px-4 pt-2 shrink-0 z-30">
+            <div className="w-full max-w-lg mx-auto flex items-start gap-2.5 p-3 rounded-2xl bg-rose-950/95 border border-rose-500/60 text-rose-200 text-xs shadow-2xl backdrop-blur-md animate-fade-in">
+              <span className="text-base shrink-0">⚠️</span>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-rose-100">Message système de Sadio</p>
+                <p className="text-[11px] text-rose-200/90 mt-0.5 leading-relaxed">{chatErrorMessage}</p>
+                {chatErrorMessage.includes('GEMINI_API_KEY') && (
+                  <div className="mt-2 p-2 rounded-lg bg-amber-950/60 border border-amber-500/40 text-[10px] text-amber-200 leading-normal">
+                    👉 <strong>Action requise sur Render.com :</strong> Allez sur <span className="underline">dashboard.render.com</span> &gt; Cliquez sur votre service &gt; Onglet <strong>Environment</strong> &gt; Ajoutez la variable <strong>GEMINI_API_KEY</strong> avec votre clé Google AI Studio.
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => setChatErrorMessage(null)}
+                className="text-rose-400 hover:text-white text-base px-1.5 py-0.5 rounded-lg hover:bg-rose-900/50 transition shrink-0"
+                title="Fermer ce message"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Speech Error Banner if browser speech needs activation */}
         {speechError && (
           <div className="w-full px-4 pt-2 shrink-0 z-20">
@@ -840,13 +866,11 @@ export default function App() {
               isVoicing={isVoicing}
               mouthOpenLevel={mouthOpenLevel}
               currentSpeechSnippet={
-                hideResponseText
-                  ? undefined
-                  : (currentSentence
-                  ? currentSentence.slice(0, 120)
+                currentSentence
+                  ? currentSentence.slice(0, 140)
                   : streamingContent
-                  ? streamingContent.slice(-100)
-                  : undefined)
+                  ? streamingContent.slice(-120)
+                  : undefined
               }
             />
           </div>
@@ -964,11 +988,7 @@ export default function App() {
           setToken(newToken);
           setUser(newUser);
           setAccess(newAccess);
-          try {
-            localStorage.setItem('sadio_auth_token', newToken);
-          } catch {
-            // ignore
-          }
+          safeStorage.setItem('sadio_auth_token', newToken);
         }}
       />
 

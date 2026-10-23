@@ -511,75 +511,36 @@ async function startServer() {
     let lastErrorMsg = '';
 
     if (ai && contents.length > 0) {
-      const candidateModels = [
-        'gemini-flash-latest',
-        'gemini-2.5-flash',
-        'gemini-3.8-flash',
-        'gemini-3.1-flash-lite',
-      ];
+      try {
+        const config: Record<string, any> = {
+          systemInstruction,
+          temperature: 0.65,
+          maxOutputTokens: 4096,
+        };
 
-      for (const modelName of candidateModels) {
-        if (res.destroyed || res.writableEnded) break;
+        const responseStream = await ai.models.generateContentStream({
+          model: 'gemini-2.5-flash',
+          contents,
+          config,
+        });
 
-        try {
-          const config: Record<string, any> = {
-            systemInstruction,
-            temperature: 0.65,
-            maxOutputTokens: 4096,
-          };
-
-          const responseStream = await ai.models.generateContentStream({
-            model: modelName,
-            contents,
-            config,
-          });
-
-          for await (const chunk of responseStream) {
-            if (res.destroyed || res.writableEnded) break;
-            if (chunk.text) {
-              res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-              (res as any).flush?.();
-            }
+        for await (const chunk of responseStream) {
+          if (res.destroyed || res.writableEnded) break;
+          if (chunk.text) {
+            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+            (res as any).flush?.();
           }
-
-          if (!res.destroyed && !res.writableEnded) {
-            res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-            clearInterval(heartbeat);
-            res.end();
-          }
-          streamedSuccessfully = true;
-          break;
-        } catch (err: any) {
-          lastErrorMsg = err?.message || String(err);
-          console.warn(`Gemini streaming failed on model ${modelName}:`, err);
         }
-      }
 
-      if (!streamedSuccessfully) {
-        // Non-streaming fallback attempt with Gemini
-        try {
-          const fallbackResponse = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
-            contents,
-            config: {
-              systemInstruction,
-              temperature: 0.65,
-              maxOutputTokens: 8192,
-            },
-          });
-
-          const fallbackText = fallbackResponse.text || '';
-          if (fallbackText) {
-            res.write(`data: ${JSON.stringify({ text: fallbackText })}\n\n`);
-            res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-            clearInterval(heartbeat);
-            res.end();
-            return;
-          }
-        } catch (fallbackError: any) {
-          lastErrorMsg = fallbackError?.message || String(fallbackError);
-          console.error('All Gemini attempts failed:', fallbackError);
+        if (!res.destroyed && !res.writableEnded) {
+          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+          clearInterval(heartbeat);
+          res.end();
         }
+        streamedSuccessfully = true;
+      } catch (err: any) {
+        lastErrorMsg = err?.message || String(err);
+        console.warn(`Gemini streaming failed on gemini-2.5-flash, using fast assistant fallback:`, err);
       }
     }
 

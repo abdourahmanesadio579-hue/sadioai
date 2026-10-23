@@ -472,16 +472,24 @@ export default function App() {
         headers['x-guest-demo'] = 'true';
       }
 
+      const payload = {
+        messages: newMessages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+        customInstructions: `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
+      };
+
+      console.log('🤖 [SADIO DEBUG] Envoi de la requête /api/chat :', {
+        endpoint: '/api/chat',
+        headers,
+        payload,
+      });
+
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          messages: newMessages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-          customInstructions: `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
-        }),
+        body: JSON.stringify(payload),
         signal: abortController.signal,
       });
 
@@ -647,8 +655,20 @@ export default function App() {
         if (finalSentence.length > 0 && !/[.!?…]$/.test(finalSentence)) {
           finalSentence += '.';
         }
+
+        let callbackFired = false;
+        const safetyTimer = setTimeout(() => {
+          if (!callbackFired && currentRequestIdRef.current === requestId) {
+            callbackFired = true;
+            setSpeakingMessageId(null);
+            setRobotState('idle');
+          }
+        }, 8000);
+
         finishStreamingSpeech(finalSentence, () => {
-          if (currentRequestIdRef.current === requestId) {
+          if (!callbackFired && currentRequestIdRef.current === requestId) {
+            callbackFired = true;
+            clearTimeout(safetyTimer);
             setSpeakingMessageId(null);
             setRobotState('idle');
           }

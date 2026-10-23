@@ -488,6 +488,9 @@ export default function App() {
       if (currentRequestIdRef.current !== requestId) return;
 
       if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error("⚠️ Erreur 404 (/api/chat introuvable) : Sur Render.com, vous devez déployer ce projet en tant que Web Service (Node) et non comme Static Site. Assurez-vous que votre service utilise 'npm start' ou 'tsx server.ts' comme commande de démarrage.");
+        }
         const errorData = await response.json().catch(() => ({}));
         if (response.status === 401) {
           setIsAuthModalOpen(true);
@@ -827,6 +830,13 @@ export default function App() {
                 {chatErrorMessage.includes('GEMINI_API_KEY') && (
                   <div className="mt-2 p-2 rounded-lg bg-amber-950/60 border border-amber-500/40 text-[10px] text-amber-200 leading-normal">
                     👉 <strong>Action requise sur Render.com :</strong> Allez sur <span className="underline">dashboard.render.com</span> &gt; Cliquez sur votre service &gt; Onglet <strong>Environment</strong> &gt; Ajoutez la variable <strong>GEMINI_API_KEY</strong> avec votre clé Google AI Studio.
+                  </div>
+                )}
+                {chatErrorMessage.includes('404') && (
+                  <div className="mt-2 p-2 rounded-lg bg-indigo-950/75 border border-indigo-500/40 text-[10px] text-indigo-200 leading-normal">
+                    🚀 <strong>Conseil hébergement (Render.com) :</strong> Sadio est une application Full-Stack (Node.js + React). Sur Render, votre service doit impérativement être créé en tant que <strong>Web Service</strong> (et non Static Site).<br/>
+                    • Build Command : <code>npm install && npm run build</code><br/>
+                    • Start Command : <code>npm start</code>
                   </div>
                 )}
               </div>

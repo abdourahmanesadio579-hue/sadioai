@@ -207,14 +207,14 @@ async function streamFromOpenAICompatible(options: {
   systemInstruction: string;
   res: Response;
   heartbeat: NodeJS.Timeout;
-}): Promise<boolean> {
+}): Promise<{ success: boolean; status?: number; error?: string }> {
   const { url, apiKey, model, messages, systemInstruction, res, heartbeat } = options;
   try {
     const cleanList = messages.filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0);
     const firstUserIdx = cleanList.findIndex((m) => m.role === 'user');
     if (firstUserIdx === -1) {
       console.warn("⚠️ [SADIO FAILOVER] Aucun message utilisateur dans la requête pour DeepSeek.");
-      return false;
+      return { success: false, error: 'No user message found' };
     }
 
     const turnsFromFirstUser = cleanList.slice(firstUserIdx);
@@ -245,11 +245,11 @@ async function streamFromOpenAICompatible(options: {
     }
 
     if (formattedMessages.length <= 1) {
-      return false;
+      return { success: false, error: 'Formatted messages empty' };
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout for DeepSeek
+    const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout for DeepSeek
 
     const response = await fetch(url, {
       method: 'POST',
@@ -272,8 +272,12 @@ async function streamFromOpenAICompatible(options: {
 
     if (!response.ok || !response.body) {
       const errorText = await response.text().catch(() => '');
-      console.warn(`⚠️ [SADIO FAILOVER] DeepSeek API a retourné HTTP ${response.status} : ${errorText.slice(0, 300)}`);
-      return false;
+      if (response.status === 402 || errorText.toLowerCase().includes('insufficient balance')) {
+        console.warn(`⚠️ [SADIO DEEPSEEK] HTTP 402 - Solde insuffisant sur DeepSeek ! Veuillez recharger 2$ sur platform.deepseek.com.`);
+      } else {
+        console.warn(`⚠️ [SADIO FAILOVER] DeepSeek API a retourné HTTP ${response.status} : ${errorText.slice(0, 300)}`);
+      }
+      return { success: false, status: response.status, error: errorText };
     }
 
     const reader = response.body.getReader();
@@ -316,12 +320,12 @@ async function streamFromOpenAICompatible(options: {
         clearInterval(heartbeat);
         res.end();
       }
-      return true;
+      return { success: true, status: 200 };
     }
-    return false;
+    return { success: false, status: response.status, error: 'No tokens received' };
   } catch (err: any) {
     console.warn(`Error during fallback streaming to ${url}:`, err?.message || err);
-    return false;
+    return { success: false, error: err?.message || String(err) };
   }
 }
 
@@ -373,6 +377,53 @@ async function startServer() {
       deepSeekKeyMasked: deepSeekEnvKey ? `${deepSeekEnvKey.slice(0, 4)}...${deepSeekEnvKey.slice(-4)}` : null,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  app.get('/api/test-deepseek', async (_req: Request, res: Response) => {
+    const deepSeekEnvKey =
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.DEEPSEEK_KEY ||
+      process.env.DEEP_SEEK_API_KEY ||
+      process.env.DEEPSEEK_APIKEY ||
+      process.env.DEEPSEEK_TOKEN ||
+      '';
+
+    if (!deepSeekEnvKey) {
+      res.json({
+        success: false,
+        error: "Aucune variable DEEPSEEK_API_KEY n'est configurée sur le serveur.",
+      });
+      return;
+    }
+
+    try {
+      const response = await fetch('https://api.deepseek.com/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${deepSeekEnvKey}`,
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [{ role: 'user', content: 'Reponds OK en 1 mot.' }],
+          max_tokens: 10,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+      res.json({
+        httpStatus: response.status,
+        httpStatusText: response.statusText,
+        ok: response.ok,
+        keyMasked: `${deepSeekEnvKey.slice(0, 4)}...${deepSeekEnvKey.slice(-4)}`,
+        data,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || String(err),
+      });
+    }
   });
 
   app.post('/api/auth/register', (req: Request, res: Response) => {
@@ -745,7 +796,7 @@ async function startServer() {
       res.write(`data: ${JSON.stringify({ brain: 'deepseek', model: 'deepseek-chat' })}\n\n`);
       (res as any).flush?.();
 
-      streamedSuccessfully = await streamFromOpenAICompatible({
+      const deepSeekResult = await streamFromOpenAICompatible({
         url: 'https://api.deepseek.com/chat/completions',
         apiKey: deepSeekApiKey,
         model: 'deepseek-chat',
@@ -755,17 +806,29 @@ async function startServer() {
         heartbeat,
       });
 
+      streamedSuccessfully = deepSeekResult.success;
+
       if (!streamedSuccessfully) {
-        console.warn('⚠️ [SADIO FAILOVER] DeepSeek a rencontré une anomalie ou est saturé. Bascule automatique immédiate sur Google Gemini...');
-        res.write(`data: ${JSON.stringify({ brainFailover: true, target: 'gemini' })}\n\n`);
+        const isBalanceIssue = deepSeekResult.status === 402;
+        console.warn(
+          `⚠️ [SADIO FAILOVER] DeepSeek ${isBalanceIssue ? '(Solde insuffisant HTTP 402)' : 'erreur/saturation'}. Bascule automatique immédiate sur Google Gemini...`
+        );
+        res.write(
+          `data: ${JSON.stringify({
+            brainFailover: true,
+            target: 'gemini',
+            reason: isBalanceIssue ? 'deepseek_insufficient_balance' : 'deepseek_error',
+          })}\n\n`
+        );
         (res as any).flush?.();
       }
     }
 
-    // Modèles officiels supportés par @google/genai SDK (Gemini 3.8 Flash, Flash Latest, Flash Lite)
+    // Modèles Google Gemini classés par disponibilité et rapidité
+    // gemini-flash-lite-latest offre une réponse quasi-instantanée (<400ms) et un quota très élevé
     const modelsToTry = hasImage
-      ? ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite']
-      : ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
+      ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash']
+      : ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
 
     if (!streamedSuccessfully && ai && contents.length > 0) {
       console.log('🤖 [SADIO BRAIN] Prise en charge par Google Gemini (modèle prioritaire: ' + modelsToTry[0] + ')...');
@@ -825,7 +888,7 @@ async function startServer() {
     if (!streamedSuccessfully) {
       if (process.env.GROQ_API_KEY) {
         console.log('Gemini unavailable - attempting fast fallback to Groq (Llama 3.3 70B)...');
-        streamedSuccessfully = await streamFromOpenAICompatible({
+        const r = await streamFromOpenAICompatible({
           url: 'https://api.groq.com/openai/v1/chat/completions',
           apiKey: process.env.GROQ_API_KEY,
           model: 'llama-3.3-70b-versatile',
@@ -834,9 +897,10 @@ async function startServer() {
           res,
           heartbeat,
         });
+        streamedSuccessfully = r.success;
       } else if (process.env.OPENROUTER_API_KEY) {
         console.log('Gemini unavailable - attempting fallback to OpenRouter (DeepSeek V3)...');
-        streamedSuccessfully = await streamFromOpenAICompatible({
+        const r = await streamFromOpenAICompatible({
           url: 'https://openrouter.ai/api/v1/chat/completions',
           apiKey: process.env.OPENROUTER_API_KEY,
           model: 'deepseek/deepseek-chat',
@@ -845,17 +909,7 @@ async function startServer() {
           res,
           heartbeat,
         });
-      } else if (process.env.DEEPSEEK_API_KEY) {
-        console.log('Gemini unavailable - attempting fallback to DeepSeek API...');
-        streamedSuccessfully = await streamFromOpenAICompatible({
-          url: 'https://api.deepseek.com/chat/completions',
-          apiKey: process.env.DEEPSEEK_API_KEY,
-          model: 'deepseek-chat',
-          messages,
-          systemInstruction,
-          res,
-          heartbeat,
-        });
+        streamedSuccessfully = r.success;
       }
     }
 

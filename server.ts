@@ -157,7 +157,12 @@ function sanitizeMessagesForGemini(rawMessages: Array<RawInputMessage>) {
     return [{ role: 'user' as const, parts }];
   }
 
-  const turns = clean.slice(firstUserIdx);
+  const allTurns = clean.slice(firstUserIdx);
+  // Keep the most recent turns (up to 8) to avoid token bloat and prevent timeouts on mobile
+  const recentTurns = allTurns.length > 8 ? allTurns.slice(-8) : allTurns;
+  const userStartIdx = recentTurns.findIndex((m) => m.role === 'user');
+  const turns = userStartIdx !== -1 ? recentTurns.slice(userStartIdx) : recentTurns;
+
   const formatted: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
 
   for (const m of turns) {
@@ -205,18 +210,46 @@ async function streamFromOpenAICompatible(options: {
 }): Promise<boolean> {
   const { url, apiKey, model, messages, systemInstruction, res, heartbeat } = options;
   try {
-    const formattedMessages = [
+    const cleanList = messages.filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0);
+    const firstUserIdx = cleanList.findIndex((m) => m.role === 'user');
+    if (firstUserIdx === -1) {
+      console.warn("⚠️ [SADIO FAILOVER] Aucun message utilisateur dans la requête pour DeepSeek.");
+      return false;
+    }
+
+    const turnsFromFirstUser = cleanList.slice(firstUserIdx);
+    const recentTurns = turnsFromFirstUser.length > 8 ? turnsFromFirstUser.slice(-8) : turnsFromFirstUser;
+    const finalStartIdx = recentTurns.findIndex((m) => m.role === 'user');
+    const turns = finalStartIdx !== -1 ? recentTurns.slice(finalStartIdx) : recentTurns;
+
+    // Strict OpenAI/DeepSeek message format: system followed by strictly alternating user/assistant
+    const formattedMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: systemInstruction },
-      ...messages
-        .filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0)
-        .map((m) => ({
-          role: m.role === 'model' ? 'assistant' : m.role === 'assistant' ? 'assistant' : 'user',
-          content: m.content!.trim(),
-        })),
     ];
 
+    for (const m of turns) {
+      const role: 'user' | 'assistant' = m.role === 'model' || m.role === 'assistant' ? 'assistant' : 'user';
+      const text = (m.content || '').trim();
+      if (!text) continue;
+
+      if (formattedMessages.length > 1 && formattedMessages[formattedMessages.length - 1].role === role) {
+        formattedMessages[formattedMessages.length - 1].content += `\n\n${text}`;
+      } else {
+        formattedMessages.push({ role, content: text });
+      }
+    }
+
+    // Ensure the last message is always 'user'
+    while (formattedMessages.length > 1 && formattedMessages[formattedMessages.length - 1].role !== 'user') {
+      formattedMessages.pop();
+    }
+
+    if (formattedMessages.length <= 1) {
+      return false;
+    }
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
+    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout for DeepSeek
 
     const response = await fetch(url, {
       method: 'POST',
@@ -238,7 +271,8 @@ async function streamFromOpenAICompatible(options: {
     clearTimeout(timeout);
 
     if (!response.ok || !response.body) {
-      console.warn(`Fallback provider ${url} returned status ${response.status}`);
+      const errorText = await response.text().catch(() => '');
+      console.warn(`⚠️ [SADIO FAILOVER] DeepSeek API a retourné HTTP ${response.status} : ${errorText.slice(0, 300)}`);
       return false;
     }
 
@@ -297,7 +331,7 @@ async function startServer() {
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature, x-deepseek-key');
     if (req.method === 'OPTIONS') {
       res.sendStatus(200);
       return;
@@ -324,9 +358,19 @@ async function startServer() {
 
   app.get('/api/health', (_req: Request, res: Response) => {
     const hasKey = Boolean(process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY);
+    const deepSeekEnvKey =
+      process.env.DEEPSEEK_API_KEY ||
+      process.env.DEEPSEEK_KEY ||
+      process.env.DEEP_SEEK_API_KEY ||
+      process.env.DEEPSEEK_APIKEY ||
+      process.env.DEEPSEEK_TOKEN ||
+      '';
     res.json({
       status: 'ok',
       hasApiKey: hasKey,
+      hasDeepSeekKey: Boolean(deepSeekEnvKey),
+      deepSeekConfiguredOnServer: Boolean(deepSeekEnvKey),
+      deepSeekKeyMasked: deepSeekEnvKey ? `${deepSeekEnvKey.slice(0, 4)}...${deepSeekEnvKey.slice(-4)}` : null,
       timestamp: new Date().toISOString(),
     });
   });
@@ -685,18 +729,37 @@ async function startServer() {
     let streamedSuccessfully = false;
     let lastErrorMsg = '';
 
-    // PRIMARY BRAIN: If DeepSeek API key is configured and there is no image, use DeepSeek as primary brain
-    if (process.env.DEEPSEEK_API_KEY && !hasImage) {
-      console.log('🤖 [SADIO BRAIN] Utilisation de DeepSeek (deepseek-chat) comme cerveau principal...');
+    // PREMIER CERVEAU : DeepSeek API (clé passée par le client ou configurée dans l'environnement Render/Cloud)
+    const deepSeekApiKey =
+      (req.headers['x-deepseek-key'] as string)?.trim() ||
+      (req.body.deepseekApiKey as string)?.trim() ||
+      process.env.DEEPSEEK_API_KEY?.trim() ||
+      process.env.DEEPSEEK_KEY?.trim() ||
+      process.env.DEEP_SEEK_API_KEY?.trim() ||
+      process.env.DEEPSEEK_APIKEY?.trim() ||
+      process.env.DEEPSEEK_TOKEN?.trim() ||
+      '';
+
+    if (deepSeekApiKey && !hasImage) {
+      console.log('🤖 [SADIO BRAIN] Utilisation de DeepSeek (deepseek-chat) comme premier cerveau...');
+      res.write(`data: ${JSON.stringify({ brain: 'deepseek', model: 'deepseek-chat' })}\n\n`);
+      (res as any).flush?.();
+
       streamedSuccessfully = await streamFromOpenAICompatible({
         url: 'https://api.deepseek.com/chat/completions',
-        apiKey: process.env.DEEPSEEK_API_KEY,
+        apiKey: deepSeekApiKey,
         model: 'deepseek-chat',
         messages,
         systemInstruction,
         res,
         heartbeat,
       });
+
+      if (!streamedSuccessfully) {
+        console.warn('⚠️ [SADIO FAILOVER] DeepSeek a rencontré une anomalie ou est saturé. Bascule automatique immédiate sur Google Gemini...');
+        res.write(`data: ${JSON.stringify({ brainFailover: true, target: 'gemini' })}\n\n`);
+        (res as any).flush?.();
+      }
     }
 
     // Modèles officiels supportés par @google/genai SDK (Gemini 3.8 Flash, Flash Latest, Flash Lite)
@@ -705,6 +768,9 @@ async function startServer() {
       : ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
 
     if (!streamedSuccessfully && ai && contents.length > 0) {
+      console.log('🤖 [SADIO BRAIN] Prise en charge par Google Gemini (modèle prioritaire: ' + modelsToTry[0] + ')...');
+      res.write(`data: ${JSON.stringify({ brain: 'gemini', model: modelsToTry[0] })}\n\n`);
+      (res as any).flush?.();
       for (const modelName of modelsToTry) {
         if (res.destroyed || res.writableEnded) break;
 
@@ -714,7 +780,7 @@ async function startServer() {
             maxOutputTokens: 4096,
           };
 
-          // Limit connection wait time to 8 seconds per model to prevent multi-minute blocking
+          // Timeout généreux de 25 secondes pour laisser le temps aux réponses détaillées et aux connexions mobiles
           const streamPromise = ai.models.generateContentStream({
             model: modelName,
             contents,
@@ -722,7 +788,7 @@ async function startServer() {
           });
 
           const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout de connexion au modèle ${modelName} (>8s)`)), 8000)
+            setTimeout(() => reject(new Error(`Timeout de connexion au modèle ${modelName} (>25s)`)), 25000)
           );
 
           const responseStream = await Promise.race([streamPromise, timeoutPromise]);
@@ -818,7 +884,7 @@ async function startServer() {
       } else if (q.includes('facture') || q.includes('gemini') || q.includes('paiement') || q.includes('carte') || q.includes('djamo')) {
         fallbackReply = `Concernant la facturation de l'API Gemini et le déploiement de votre application :\n\n- **Facturation Google AI Studio / Google Cloud** : Pour passer en Pay-as-you-go, vous pouvez utiliser une carte bancaire internationale Visa/Mastercard (les cartes virtuelles prépayées comme Djamo, UBA, ou Revolut sont généralement acceptées pour les transactions en ligne).\n- **Gestion des coûts** : Définissez un plafond budgétaire (budget alert) dans Google Cloud pour maîtriser vos dépenses.\n\nN'hésitez pas à me poser d'autres questions sur la configuration.`;
       } else {
-        fallbackReply = `C'est une excellente interrogation. En tant que Sadio, votre avatar robot cybernétique, je prends note de votre question concernant : « *${lastUserMsg}* ».\n\nMes relais de calcul ont rencontré une brève latence réseau sur les serveurs centraux de Google. Je vous invite à renouveler votre question dans un instant, ou à vérifier la connexion si le problème persiste.`;
+        fallbackReply = `C'est une excellente interrogation. En tant que Sadio, votre avatar robot cybernétique, je prends note de votre question concernant : « *${lastUserMsg}* ».\n\nMes relais de calcul ont rencontré une brève latence réseau. Je vous invite à renouveler votre question dans un instant, ou à vérifier la connexion si le problème persiste.`;
       }
     }
 

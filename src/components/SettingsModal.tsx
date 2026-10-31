@@ -160,6 +160,49 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             )}
           </div>
 
+          {/* Architecture Moteur Bi-Cerveau : DeepSeek + Gemini (Géré côté serveur) */}
+          <div className="p-3.5 rounded-xl bg-gradient-to-br from-indigo-950/60 via-slate-900 to-cyan-950/40 border border-indigo-500/30 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded-lg bg-indigo-500/20 border border-indigo-400/40 flex items-center justify-center shrink-0">
+                  <Cpu className="w-3.5 h-3.5 text-indigo-400" />
+                </div>
+                <div>
+                  <span className="text-xs font-bold text-white block">Architecture Cognitive : Bi-Cerveau</span>
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    ● Premier Cerveau : DeepSeek (Serveur) • Relais : Gemini
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5 text-[11px] text-slate-300">
+              <div className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 flex items-start gap-2">
+                <span className="text-indigo-400 font-bold shrink-0">1.</span>
+                <div>
+                  <span className="font-semibold text-slate-100">DeepSeek (Prioritaire)</span>
+                  <p className="text-[10px] text-slate-400">
+                    Traite en priorité toutes vos questions textuelles avec un raisonnement approfondi.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-2 rounded-lg bg-slate-950/70 border border-slate-800 flex items-start gap-2">
+                <span className="text-cyan-400 font-bold shrink-0">2.</span>
+                <div>
+                  <span className="font-semibold text-slate-100">Google Gemini (Vision & Repli)</span>
+                  <p className="text-[10px] text-slate-400">
+                    Analyse instantanément les images et prend le relais sans coupure en cas de latence réseau.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <p className="text-[10px] text-slate-400 italic">
+              🔒 Sécurité totale : Les clés API sont hébergées et protégées sur votre serveur Render. Les visiteurs n'ont aucune clé à saisir.
+            </p>
+          </div>
+
           {/* Moteur & Modèle Recommandé pour l'Analyse d'Image */}
           <div className="p-3 rounded-xl bg-gradient-to-br from-cyan-950/40 via-slate-900 to-indigo-950/30 border border-cyan-500/30 space-y-2">
             <div className="flex items-center gap-2">

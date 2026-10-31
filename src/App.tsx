@@ -77,6 +77,11 @@ export default function App() {
   const [isResponseCardDismissed, setIsResponseCardDismissed] = useState<boolean>(false);
   const [copiedResponse, setCopiedResponse] = useState<boolean>(false);
 
+  // DeepSeek Primary Brain Key (Configurable directly from device)
+  const [deepSeekKey, setDeepSeekKey] = useState<string>(() => {
+    return safeStorage.getItem('sadio_deepseek_api_key') || '';
+  });
+
   // Gemini Vision Image analysis state
   const [selectedImage, setSelectedImage] = useState<ProcessedImage | null>(null);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
@@ -161,10 +166,16 @@ export default function App() {
     fetch('/api/health')
       .then((res) => res.json())
       .then((data) => {
-        if (data && data.hasApiKey === false) {
-          setChatErrorMessage(
-            "⚠️ Clé GEMINI_API_KEY manquante sur le serveur. Veuillez configurer la variable d'environnement GEMINI_API_KEY dans votre tableau de bord Render.com."
-          );
+        if (data) {
+          console.log('🤖 [SADIO DIAGNOSTIC SERVEUR] État des clés IA sur le serveur :', {
+            gemini: data.hasApiKey ? '✅ Active' : '❌ Absente',
+            deepseek: data.hasDeepSeekKey ? `✅ Active sur le serveur (${data.deepSeekKeyMasked})` : '❌ Absente des variables Render',
+          });
+          if (data.hasApiKey === false && data.hasDeepSeekKey === false) {
+            setChatErrorMessage(
+              "⚠️ Aucune clé IA détectée sur le serveur. Veuillez configurer DEEPSEEK_API_KEY ou GEMINI_API_KEY dans votre tableau de bord Render.com."
+            );
+          }
         }
       })
       .catch(() => {});
@@ -479,6 +490,9 @@ export default function App() {
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
 
+    const tStart = performance.now();
+    console.log(`⏱️ [SADIO LATENCE] [T0 = 0 ms] Déclenchement de la requête pour : "${(rawPrompt || "Analyse visuelle d'image").slice(0, 45)}..."`);
+
     setInput('');
     setSelectedImage(null);
     setIsResponseCardDismissed(false);
@@ -538,8 +552,12 @@ export default function App() {
       } else {
         headers['x-guest-demo'] = 'true';
       }
+      if (deepSeekKey) {
+        headers['x-deepseek-key'] = deepSeekKey;
+      }
 
       const payload = {
+        deepseekApiKey: deepSeekKey || undefined,
         messages: newMessages.map((m) => ({
           role: m.role,
           content: m.content,
@@ -556,11 +574,16 @@ export default function App() {
           : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
       };
 
-      console.log('🤖 [SADIO DEBUG] Envoi de la requête /api/chat :', {
-        endpoint: '/api/chat',
-        headers,
-        payload,
-      });
+      const tPayloadReady = performance.now();
+      console.log(
+        `⏱️ [SADIO LATENCE] [T1 = +${(tPayloadReady - tStart).toFixed(0)} ms] Payload préparé :\n` +
+        `   • Messages dans l'historique : ${newMessages.length}\n` +
+        `   • Image attachée : ${imageToSend ? 'Oui' : 'Non'}\n` +
+        `   • Clé DeepSeek : ${deepSeekKey ? 'Fournie localement via le navigateur' : 'Gérée automatiquement par le serveur (Render)'}`
+      );
+
+      const tFetchStart = performance.now();
+      console.log(`⏱️ [SADIO LATENCE] [T2 = +${(tFetchStart - tStart).toFixed(0)} ms] Expédition requête POST /api/chat...`);
 
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -568,6 +591,14 @@ export default function App() {
         body: JSON.stringify(payload),
         signal: abortController.signal,
       });
+
+      const tHeadersReceived = performance.now();
+      const fetchTransitMs = (tHeadersReceived - tFetchStart).toFixed(0);
+      const totalToHeadersMs = (tHeadersReceived - tStart).toFixed(0);
+      console.log(
+        `⏱️ [SADIO LATENCE] [T3 = +${totalToHeadersMs} ms] En-têtes HTTP reçus ! Code: ${response.status} ${response.statusText}\n` +
+        `   • Temps aller-retour réseau + handshake : ${fetchTransitMs} ms`
+      );
 
       if (currentRequestIdRef.current !== requestId) return;
 
@@ -590,9 +621,15 @@ export default function App() {
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
+      const tReaderReady = performance.now();
+      console.log(`⏱️ [SADIO LATENCE] [T4 = +${(tReaderReady - tStart).toFixed(0)} ms] Flux SSE ouvert. En attente du 1er paquet de tokens...`);
+
       let accumulatedText = '';
       let buffer = '';
       let spokenCharIndex = 0;
+      let firstTokenLogged = false;
+      let tFirstToken = 0;
+      let tokenChunkCount = 0;
 
       while (true) {
         const { value, done } = await reader.read();
@@ -608,7 +645,26 @@ export default function App() {
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
+              if (data.brain) {
+                console.log(`🧠 [SADIO CERVEAU ACTIF] Réponse générée par : ${String(data.brain).toUpperCase()} (${data.model || ''})`);
+              }
+              if (data.brainFailover) {
+                console.warn(`⚠️ [SADIO FAILOVER DÉCLENCHÉ] Bascule serveur vers : ${String(data.target).toUpperCase()}`);
+              }
               if (data.text) {
+                if (!firstTokenLogged) {
+                  firstTokenLogged = true;
+                  tFirstToken = performance.now();
+                  const ttftFromFetch = (tFirstToken - tFetchStart).toFixed(0);
+                  const ttftFromStart = (tFirstToken - tStart).toFixed(0);
+                  console.log(
+                    `🚀 [SADIO LATENCE] [T5 = +${ttftFromStart} ms] PREMIER TOKEN REÇU (TTFT) !\n` +
+                    `   ⏱️ Latence depuis expédition HTTP : ${ttftFromFetch} ms (TTFT)\n` +
+                    `   ⏱️ Latence totale depuis le clic : ${ttftFromStart} ms\n` +
+                    `   📝 Premier extrait : "${data.text.slice(0, 45).replace(/\n/g, ' ')}..."`
+                  );
+                }
+                tokenChunkCount++;
                 accumulatedText += data.text;
                 currentAccumulatedTextRef.current = accumulatedText;
                 if (currentRequestIdRef.current === requestId) {
@@ -692,6 +748,19 @@ export default function App() {
 
       if (currentRequestIdRef.current !== requestId) return;
 
+      const tStreamEnd = performance.now();
+      const streamSec = tFirstToken ? ((tStreamEnd - tFirstToken) / 1000).toFixed(2) : '0';
+      const totalSec = ((tStreamEnd - tStart) / 1000).toFixed(2);
+      console.log(
+        `✅ [SADIO LATENCE] [T6 = +${(tStreamEnd - tStart).toFixed(0)} ms] Fin complète du flux de réponse !\n` +
+        `   📊 Synthèse de performance :\n` +
+        `   • TTFT (Temps au 1er token) : ${tFirstToken ? (tFirstToken - tFetchStart).toFixed(0) : 'N/A'} ms\n` +
+        `   • Durée de génération active : ${streamSec} s\n` +
+        `   • Longueur texte généré : ${accumulatedText.length} caractères (${tokenChunkCount} fragments)\n` +
+        `   • Débit : ~${(accumulatedText.length / (parseFloat(streamSec) || 0.1)).toFixed(0)} car/s\n` +
+        `   • Temps total de transaction : ${totalSec} s`
+      );
+
       // Live response ended, finalize speaking state
       clearThinkingTimers();
       setIsThinking(false);
@@ -763,7 +832,11 @@ export default function App() {
       }
       if (currentRequestIdRef.current !== requestId) return;
 
-      console.error('Chat error:', err);
+      const tError = performance.now();
+      console.error(
+        `❌ [SADIO LATENCE] [ERREUR à +${(tError - tStart).toFixed(0)} ms depuis l'envoi] :\n` +
+        `   ${err instanceof Error ? err.message : String(err)}`
+      );
       clearThinkingTimers();
       setIsThinking(false);
       setThinkingSeconds(null);

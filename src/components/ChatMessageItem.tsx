@@ -1,6 +1,21 @@
 import React, { useState } from 'react';
 import { ChatMessage } from '../types/chat';
-import { Copy, Check, Volume2, Square, Bot, User, Sparkles, Eye, EyeOff, Radio } from 'lucide-react';
+import {
+  Copy,
+  Check,
+  Volume2,
+  Square,
+  Bot,
+  User,
+  Sparkles,
+  Eye,
+  EyeOff,
+  Radio,
+  Image as ImageIcon,
+  Maximize2,
+  X,
+} from 'lucide-react';
+import { formatFileSize } from '../utils/imageCompressor';
 
 interface ChatMessageItemProps {
   message: ChatMessage;
@@ -24,6 +39,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   const isInitGreeting = message.id === 'init-msg-1';
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const [showFullText, setShowFullText] = useState<boolean>(false);
+  const [isImageModalOpen, setIsImageModalOpen] = useState<boolean>(false);
 
   const copyToClipboard = (text: string, id: string) => {
     navigator.clipboard.writeText(text);
@@ -297,6 +313,37 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
           </div>
         )}
 
+        {/* Optional Image attachment preview */}
+        {message.image && (
+          <div className="mb-2.5 rounded-xl overflow-hidden border border-cyan-500/40 bg-slate-950/80 shadow-md">
+            <div
+              className="relative group cursor-pointer overflow-hidden bg-slate-950"
+              onClick={() => setIsImageModalOpen(true)}
+              title="Cliquer pour agrandir l'image"
+            >
+              <img
+                src={message.image.dataUrl}
+                alt={message.image.name || "Image analysée par Gemini Vision"}
+                className="max-h-56 sm:max-h-64 w-auto rounded-lg object-contain mx-auto transition-transform duration-300 group-hover:scale-105"
+                loading="lazy"
+              />
+              <div className="absolute inset-0 bg-slate-950/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-1.5 text-xs text-cyan-200 font-semibold backdrop-blur-xs">
+                <Maximize2 className="w-4 h-4 text-cyan-400" />
+                <span>Agrandir l'image</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/95 border-t border-slate-800 text-[11px]">
+              <span className="flex items-center gap-1.5 text-cyan-300 font-mono truncate">
+                <ImageIcon className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="truncate max-w-[180px] xs:max-w-xs">{message.image.name || 'Image'}</span>
+              </span>
+              <span className="font-mono text-[10px] text-slate-400 shrink-0 ml-2">
+                {message.image.size ? formatFileSize(message.image.size) : 'Vision'}
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Content */}
         {isBot && !isErrorMessage && !isInitGreeting && hideResponseText && !showFullText ? (
           <div className="py-1">
@@ -403,6 +450,43 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
       {!isBot && (
         <div className="shrink-0 w-7 sm:w-8 h-7 sm:h-8 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-300 mt-1">
           <User className="w-3.5 sm:w-4 h-3.5 sm:h-4 text-cyan-400" />
+        </div>
+      )}
+
+      {/* Full-screen Image Lightbox Modal */}
+      {isImageModalOpen && message.image && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md p-3 sm:p-6 animate-fade-in"
+          onClick={() => setIsImageModalOpen(false)}
+        >
+          <div
+            className="relative max-w-4xl max-h-[90vh] flex flex-col items-center bg-slate-950 border border-cyan-500/50 rounded-2xl p-2 sm:p-3 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-full flex items-center justify-between pb-2 mb-2 border-b border-slate-800 px-2 text-xs">
+              <span className="font-semibold text-cyan-300 flex items-center gap-1.5">
+                <ImageIcon className="w-4 h-4 text-cyan-400" />
+                <span className="truncate max-w-[250px] sm:max-w-md">{message.image.name || 'Image'}</span>
+              </span>
+              <button
+                onClick={() => setIsImageModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                title="Fermer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto flex items-center justify-center p-1">
+              <img
+                src={message.image.dataUrl}
+                alt={message.image.name || "Aperçu agrandi"}
+                className="max-h-[75vh] w-auto max-w-full object-contain rounded-xl"
+              />
+            </div>
+            <div className="w-full pt-2 text-center text-[11px] text-slate-400 font-mono">
+              Analysé par le module Vision de Sadio • {message.image.size ? formatFileSize(message.image.size) : 'Gemini'}
+            </div>
+          </div>
         </div>
       )}
     </div>

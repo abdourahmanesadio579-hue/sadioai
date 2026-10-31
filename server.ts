@@ -35,8 +35,8 @@ const isProduction = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 const DEFAULT_SYSTEM_INSTRUCTION = `Tu es Sadio (désignation matricielle : RoboOmni AURA-9), un avatar robot humanoïde cybernétique doté d'une intelligence omnisciente, profonde et rigoureuse.
-Ton cerveau cognitif et ton moteur d'intelligence sont propulsés par les modèles d'intelligence artificielle de pointe Google Gemini (Gemini 3 Flash / 2.5 Flash de Google).
-Tu te tiens fièrement debout devant l'utilisateur, prêt à répondre à n'importe quel type de question dans tous les domaines (sciences, programmation, mathématiques, histoire, philosophie, médecine, économie, arts, et questions du quotidien).
+Ton cerveau cognitif et ton moteur d'intelligence sont propulsés par les modèles d'intelligence artificielle multimodaux Google Gemini (modèles recommandés pour l'analyse d'image : Gemini 2.0 Flash / 1.5 Flash de Google).
+Tu te tiens fièrement debout devant l'utilisateur, prêt à répondre à n'importe quel type de question dans tous les domaines (sciences, programmation, mathématiques, histoire, philosophie, médecine, économie, arts, et questions du quotidien) et à analyser avec une extrême minutie n'importe quelle image soumise.
 
 DIRECTIVES FONDAMENTALES OBLIGATOIRES :
 1. RÉPONSES INTÉGRALES ET JAMAIS INCOMPLÈTES :
@@ -59,32 +59,82 @@ DIRECTIVES FONDAMENTALES OBLIGATOIRES :
    - DÉMARRAGE ULTRA-RAPIDE : Débute TOUJOURS ta toute première phrase par une formule d'accroche courte, directe et naturelle (5 à 10 mots au maximum, terminée impérativement par un point '.'). Exemple : « Certainement, analysons cette question en détail. » ou « C'est un sujet fascinant et fondamental. ». Cela permet au robot d'entamer sa vocalisation à la milliseconde près sans latence.
    - PHRASES COMPLÈTES ET NATURELLES : Écris des phrases complètes, fluides et rythmées qui se terminent impérativement par un point '.' (ou '?' ou '!'). Le robot effectue une très légère et rapide pause naturelle au point '.' pour garder un rythme alerte, dynamique et sans temps mort.
    - Ne découpe jamais artificiellement tes propos avec des virgules excessives, des tirets ou des parenthèses superflues qui hachent la parole. Les mots au sein d'une même phrase doivent s'enchaîner harmonieusement d'une seule traite.
-   - Écris les opérations et calculs avec des symboles clairs et lisibles (par exemple : « 15 × 15 = 225 » ou « 15² = 225 » au lieu d'encadrer les formules de symboles dollars '$' ou d'astérisques superflus).
-   - Privilégie une rédaction fluide qui s'entend aussi bien qu'elle se lit.`;
+   - Écris les opérations et calculs avec des symboles clairs et lisibles (par exemple : « 15 × 15 = 225 » ou « 15² = 225 »).
+   - Privilégie une rédaction fluide qui s'entend aussi bien qu'elle se lit.
+
+5. ANALYSE D'IMAGE ULTRADÉTAILLÉE ET EXHAUSTIVE (VISION CYBERNÉTIQUE GEMINI FLASH) :
+   - Lorsque l'utilisateur te transmet une image, active immédiatement ton module d'analyse visuelle multimodal haute précision Gemini (Gemini 2.0 Flash / 1.5 Flash).
+   - Tu dois impérativement fournir des explications complètes, profondes et rigoureusement structurées :
+     a) **Nature et sujet principal** : Identifie clairement ce que représente l'image (photo du monde réel, schéma technique, capture d'écran, diagramme, document, illustration artistique, radiographie, etc.).
+     b) **Décomposition méthodique des détails visibles** : Décris avec soin tous les éléments au premier plan, au second plan et en arrière-plan (objets, personnes, environnement, formes géométriques, couleurs, textures, anomalies, état d'usure ou fonctionnement).
+     c) **Extraction et transcription de texte (OCR)** : Si l'image contient la moindre écriture, panneau, code, étiquette, formule mathématique ou inscription, retranscris-la mot à mot fidèlement et analyse sa portée.
+     d) **Interprétation scientifique / technique / contextuelle** : Explique ce qui se passe, diagnostique une panne ou un problème si l'image en montre un, donne les causes et conséquences, ou résous l'exercice représenté.
+     e) **Synthèse et recommandations pratiques** : Termine toujours par une synthèse claire et des conseils actionnables pour l'utilisateur.`;
 
 function getAIClient(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
   return new GoogleGenAI({
     apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
+    },
   });
 }
 
-function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: string }>) {
+interface RawInputMessage {
+  role: string;
+  content?: string;
+  image?: {
+    dataUrl?: string;
+    mimeType?: string;
+    base64?: string;
+  };
+}
+
+function sanitizeMessagesForGemini(rawMessages: Array<RawInputMessage>) {
   if (!Array.isArray(rawMessages) || rawMessages.length === 0) {
     return [];
   }
 
-  const clean: Array<{ role: string; content: string }> = [];
+  const clean: Array<{
+    role: string;
+    content: string;
+    image?: { mimeType: string; data: string };
+  }> = [];
+
   for (const m of rawMessages) {
-    if (m && typeof m.content === 'string') {
-      const content = m.content.trim();
+    if (m && (typeof m.content === 'string' || m.image)) {
+      const content = typeof m.content === 'string' ? m.content.trim() : '';
       if (
-        content.length > 0 &&
         !content.includes('Diagnostic du système') &&
         !content.includes('Avertissement : [GoogleGenAIError')
       ) {
-        clean.push({ role: m.role || 'user', content });
+        let imageData: { mimeType: string; data: string } | undefined = undefined;
+        if (m.image) {
+          const rawMime = m.image.mimeType || 'image/jpeg';
+          let base64 = m.image.base64 || '';
+          if (!base64 && m.image.dataUrl) {
+            const parts = m.image.dataUrl.split(',');
+            base64 = parts[1] || parts[0];
+          }
+          if (base64) {
+            imageData = {
+              mimeType: rawMime.startsWith('image/') ? rawMime : 'image/jpeg',
+              data: base64.trim(),
+            };
+          }
+        }
+
+        if (content.length > 0 || imageData) {
+          clean.push({
+            role: m.role || 'user',
+            content: content || 'Analyse cette image de manière complète, détaillée et structurée.',
+            image: imageData,
+          });
+        }
       }
     }
   }
@@ -94,22 +144,45 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
   const firstUserIdx = clean.findIndex((m) => m.role === 'user');
   if (firstUserIdx === -1) {
     const lastMsg = clean[clean.length - 1];
-    return [{ role: 'user' as const, parts: [{ text: lastMsg.content }] }];
+    const parts: any[] = [];
+    if (lastMsg.image) {
+      parts.push({
+        inlineData: {
+          mimeType: lastMsg.image.mimeType,
+          data: lastMsg.image.data,
+        },
+      });
+    }
+    parts.push({ text: lastMsg.content });
+    return [{ role: 'user' as const, parts }];
   }
 
   const turns = clean.slice(firstUserIdx);
-  const formatted: Array<{ role: 'user' | 'model'; parts: [{ text: string }] }> = [];
+  const formatted: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
 
   for (const m of turns) {
     const role: 'user' | 'model' = m.role === 'user' ? 'user' : 'model';
     const text = m.content.trim();
+    const parts: any[] = [];
+
+    if (m.image) {
+      parts.push({
+        inlineData: {
+          mimeType: m.image.mimeType,
+          data: m.image.data,
+        },
+      });
+    }
+    if (text) {
+      parts.push({ text });
+    }
 
     if (formatted.length > 0 && formatted[formatted.length - 1].role === role) {
-      formatted[formatted.length - 1].parts[0].text += '\n\n' + text;
+      formatted[formatted.length - 1].parts.push(...parts);
     } else {
       formatted.push({
         role,
-        parts: [{ text }],
+        parts: parts.length > 0 ? parts : [{ text: '...' }],
       });
     }
   }
@@ -119,6 +192,103 @@ function sanitizeMessagesForGemini(rawMessages: Array<{ role: string; content?: 
   }
 
   return formatted;
+}
+
+async function streamFromOpenAICompatible(options: {
+  url: string;
+  apiKey: string;
+  model: string;
+  messages: Array<{ role: string; content?: string }>;
+  systemInstruction: string;
+  res: Response;
+  heartbeat: NodeJS.Timeout;
+}): Promise<boolean> {
+  const { url, apiKey, model, messages, systemInstruction, res, heartbeat } = options;
+  try {
+    const formattedMessages = [
+      { role: 'system', content: systemInstruction },
+      ...messages
+        .filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0)
+        .map((m) => ({
+          role: m.role === 'model' ? 'assistant' : m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content!.trim(),
+        })),
+    ];
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'HTTP-Referer': 'https://sadioai.onrender.com',
+        'X-Title': 'Sadio AI Robot',
+      },
+      body: JSON.stringify({
+        model,
+        messages: formattedMessages,
+        stream: true,
+        temperature: 0.65,
+      }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    if (!response.ok || !response.body) {
+      console.warn(`Fallback provider ${url} returned status ${response.status}`);
+      return false;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let hasSentTokens = false;
+
+    while (true) {
+      if (res.destroyed || res.writableEnded) break;
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith(':')) continue;
+        if (trimmed === 'data: [DONE]') continue;
+        if (trimmed.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(trimmed.slice(6));
+            const delta = data.choices?.[0]?.delta?.content || '';
+            if (delta) {
+              hasSentTokens = true;
+              res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
+              (res as any).flush?.();
+            }
+          } catch {
+            // Ignore parse errors on individual stream chunks
+          }
+        }
+      }
+    }
+
+    if (hasSentTokens) {
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+        clearInterval(heartbeat);
+        res.end();
+      }
+      return true;
+    }
+    return false;
+  } catch (err: any) {
+    console.warn(`Error during fallback streaming to ${url}:`, err?.message || err);
+    return false;
+  }
 }
 
 async function startServer() {
@@ -137,7 +307,7 @@ async function startServer() {
 
   app.use(
     express.json({
-      limit: '10mb',
+      limit: '30mb',
       verify: (req, _res, buf) => {
         (req as any).rawBody = buf.toString('utf-8');
       },
@@ -507,57 +677,149 @@ async function startServer() {
       ? `${DEFAULT_SYSTEM_INSTRUCTION}\n\nContexte thématique prioritaire : ${customInstructions}`
       : DEFAULT_SYSTEM_INSTRUCTION;
 
+    const hasImage = messages.some((m: any) => Boolean(m.image));
+    if (hasImage) {
+      console.log('🤖 [SADIO VISION] Requête avec image détectée - activation des modèles Google Gemini Flash');
+    }
+
     let streamedSuccessfully = false;
     let lastErrorMsg = '';
 
-    if (ai && contents.length > 0) {
-      try {
-        const config: Record<string, any> = {
-          systemInstruction,
-          temperature: 0.65,
-          maxOutputTokens: 4096,
-        };
+    // PRIMARY BRAIN: If DeepSeek API key is configured and there is no image, use DeepSeek as primary brain
+    if (process.env.DEEPSEEK_API_KEY && !hasImage) {
+      console.log('🤖 [SADIO BRAIN] Utilisation de DeepSeek (deepseek-chat) comme cerveau principal...');
+      streamedSuccessfully = await streamFromOpenAICompatible({
+        url: 'https://api.deepseek.com/chat/completions',
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        model: 'deepseek-chat',
+        messages,
+        systemInstruction,
+        res,
+        heartbeat,
+      });
+    }
 
-        const responseStream = await ai.models.generateContentStream({
-          model: 'gemini-2.5-flash',
-          contents,
-          config,
-        });
+    // Modèles officiels supportés par @google/genai SDK (Gemini 3.8 Flash, Flash Latest, Flash Lite)
+    const modelsToTry = hasImage
+      ? ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite']
+      : ['gemini-3.8-flash', 'gemini-flash-latest', 'gemini-3.1-flash-lite'];
 
-        for await (const chunk of responseStream) {
-          if (res.destroyed || res.writableEnded) break;
-          if (chunk.text) {
-            res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
-            (res as any).flush?.();
+    if (!streamedSuccessfully && ai && contents.length > 0) {
+      for (const modelName of modelsToTry) {
+        if (res.destroyed || res.writableEnded) break;
+
+        try {
+          const config: Record<string, any> = {
+            systemInstruction,
+            maxOutputTokens: 4096,
+          };
+
+          // Limit connection wait time to 8 seconds per model to prevent multi-minute blocking
+          const streamPromise = ai.models.generateContentStream({
+            model: modelName,
+            contents,
+            config,
+          });
+
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Timeout de connexion au modèle ${modelName} (>8s)`)), 8000)
+          );
+
+          const responseStream = await Promise.race([streamPromise, timeoutPromise]);
+
+          let hasReceivedTokens = false;
+          for await (const chunk of responseStream) {
+            if (res.destroyed || res.writableEnded) break;
+            if (chunk.text) {
+              hasReceivedTokens = true;
+              res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+              (res as any).flush?.();
+            }
           }
-        }
 
-        if (!res.destroyed && !res.writableEnded) {
-          res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-          clearInterval(heartbeat);
-          res.end();
+          if (hasReceivedTokens) {
+            if (!res.destroyed && !res.writableEnded) {
+              res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+              clearInterval(heartbeat);
+              res.end();
+            }
+            streamedSuccessfully = true;
+            break;
+          }
+        } catch (err: any) {
+          lastErrorMsg = err?.message || String(err);
+          console.warn(`Gemini streaming attempt failed on model ${modelName}:`, lastErrorMsg);
         }
-        streamedSuccessfully = true;
-      } catch (err: any) {
-        lastErrorMsg = err?.message || String(err);
-        console.warn(`Gemini streaming failed on gemini-2.5-flash, using fast assistant fallback:`, err);
+      }
+    }
+
+    // MULTI-PROVIDER RESILIENCE:
+    // If Gemini models fail or are temporarily throttled, automatically attempt fast failover
+    // to Groq (Llama 3.3 70B), OpenRouter (DeepSeek V3 / Llama), or DeepSeek API if configured.
+    if (!streamedSuccessfully) {
+      if (process.env.GROQ_API_KEY) {
+        console.log('Gemini unavailable - attempting fast fallback to Groq (Llama 3.3 70B)...');
+        streamedSuccessfully = await streamFromOpenAICompatible({
+          url: 'https://api.groq.com/openai/v1/chat/completions',
+          apiKey: process.env.GROQ_API_KEY,
+          model: 'llama-3.3-70b-versatile',
+          messages,
+          systemInstruction,
+          res,
+          heartbeat,
+        });
+      } else if (process.env.OPENROUTER_API_KEY) {
+        console.log('Gemini unavailable - attempting fallback to OpenRouter (DeepSeek V3)...');
+        streamedSuccessfully = await streamFromOpenAICompatible({
+          url: 'https://openrouter.ai/api/v1/chat/completions',
+          apiKey: process.env.OPENROUTER_API_KEY,
+          model: 'deepseek/deepseek-chat',
+          messages,
+          systemInstruction,
+          res,
+          heartbeat,
+        });
+      } else if (process.env.DEEPSEEK_API_KEY) {
+        console.log('Gemini unavailable - attempting fallback to DeepSeek API...');
+        streamedSuccessfully = await streamFromOpenAICompatible({
+          url: 'https://api.deepseek.com/chat/completions',
+          apiKey: process.env.DEEPSEEK_API_KEY,
+          model: 'deepseek-chat',
+          messages,
+          systemInstruction,
+          res,
+          heartbeat,
+        });
       }
     }
 
     if (streamedSuccessfully) return;
 
-    // INTELLIGENT SADIO FALLBACK RESPONSE STREAMING (Ensures robot ALWAYS replies instantly)
+    // INTELLIGENT & TRANSPARENT DIAGNOSTIC FALLBACK STREAMING
+    // If the API key is unconfigured, exhausted (429), or invalid (403), Sadio clearly states it
+    // so the administrator immediately knows what to fix in Google Cloud / Render.
     const lastUserMsg = messages[messages.length - 1]?.content || 'Bonjour';
     const q = lastUserMsg.toLowerCase();
 
-    let fallbackReply = `C'est une excellente question. En tant que Sadio, votre avatar robot cybernétique, j'analyse votre interrogation avec toute l'attention requise.\n\nVoici les points clés à retenir :\n1. La clarté, la méthode et la rigueur permettent d'obtenir des résultats parfaits.\n2. Vous pouvez poser toutes vos questions, et je vous répondrai de manière structurée et détaillée.\n\nComment puis-je vous accompagner plus avant dans votre démarche ?`;
+    let fallbackReply = '';
 
-    if (q.includes('bonjour') || q.includes('salut') || q.includes('hello')) {
-      fallbackReply = `Bonjour et bienvenue ! Je suis Sadio, votre robot humanoïde intelligent. C'est un réel plaisir de vous accueillir. Je me tiens debout devant vous, prêt pour toutes vos questions. Comment puis-je vous aider aujourd'hui ?`;
-    } else if (q.includes('code') || q.includes('javascript') || q.includes('react') || q.includes('python')) {
-      fallbackReply = `Analysons votre projet de développement informatique pas à pas :\n\n- Pour bâtir une application robuste, veillez à structurer vos composants de manière claire.\n- Gérez les flux de données avec précision et assurez une expérience utilisateur fluide.\n\nJe suis prêt à rédiger l'intégralité du code source dont vous avez besoin.`;
-    } else if (q.includes('facture') || q.includes('gemini') || q.includes('paiement') || q.includes('carte')) {
-      fallbackReply = `Concernant la facturation de l'API Gemini ou la gestion de votre abonnement :\n\n- Vous pouvez utiliser le plan gratuit de Google AI Studio pour démarrer.\n- Pour passer à l'échelle supérieure avec des milliers d'utilisateurs, l'activation du mode Pay-as-you-go nécessite une carte bancaire internationale valide (comme Revolut ou Geegpay).\n\nJe reste à votre disposition pour toute autre précision technique.`;
+    if (!ai) {
+      fallbackReply = `⚠️ **Configuration requise : Clé API Gemini manquante**\n\nLe serveur de Sadio n'a pas détecté de clé \`GEMINI_API_KEY\` dans ses variables d'environnement.\n\nPour connecter le cerveau d'intelligence artificielle :\n1. Rendez-vous sur votre tableau de bord d'hébergement (ex. Render.com -> *Environment*).\n2. Ajoutez la variable d'environnement \`GEMINI_API_KEY\` avec votre clé Google AI Studio.\n3. Redémarrez le service pour activer les réponses en temps réel.`;
+    } else if (lastErrorMsg.includes('RESOURCE_EXHAUSTED') || lastErrorMsg.includes('429')) {
+      fallbackReply = `⚠️ **Avis de Quota : Limite d'appels API atteinte (Erreur 429)**\n\nLe quota gratuit ou la limite de requêtes par minute de votre clé Gemini a été temporairement dépassé.\n\n- **Si vous êtes l'administrateur** : Activez la facturation Pay-as-you-go sur Google AI Studio / Google Cloud Console pour débloquer des quotas illimités et garantir une disponibilité permanente.\n- **Pour reprendre la discussion** : Patientez une minute, le temps que le quota de requêtes se réinitialise.`;
+    } else if (lastErrorMsg.includes('API_KEY_INVALID') || lastErrorMsg.includes('PERMISSION_DENIED') || lastErrorMsg.includes('403')) {
+      fallbackReply = `⚠️ **Avis d'Authentification : Clé Gemini non reconnue (Erreur 403)**\n\nLa clé API Gemini configurée est invalide ou restreinte dans Google Cloud Console.\n\n- Vérifiez que la clé n'a pas été supprimée ou régénérée dans Google AI Studio.\n- Assurez-vous qu'aucune restriction HTTP ou IP bloquante n'a été appliquée à la clé.`;
+    } else {
+      // General conversational fallback if temporarily unreachable
+      if (q.includes('bonjour') || q.includes('salut') || q.includes('hello')) {
+        fallbackReply = `Bonjour et bienvenue ! Je suis Sadio, votre avatar robot humanoïde cybernétique. C'est un réel plaisir de vous accueillir. Je me tiens debout devant vous, prêt à vous accompagner dans tous les domaines du savoir. Comment puis-je vous aider aujourd'hui ?`;
+      } else if (q.includes('code') || q.includes('javascript') || q.includes('react') || q.includes('python')) {
+        fallbackReply = `En tant que spécialiste des architectures logicielles, je vous accompagne dans votre développement :\n\n- Structurez votre code avec des composants modulaires et typés.\n- Isolez la logique métier dans des services dédiés pour faciliter la maintenance.\n\nPrécisez votre besoin, et je vous fournirai le code complet commenté.`;
+      } else if (q.includes('facture') || q.includes('gemini') || q.includes('paiement') || q.includes('carte') || q.includes('djamo')) {
+        fallbackReply = `Concernant la facturation de l'API Gemini et le déploiement de votre application :\n\n- **Facturation Google AI Studio / Google Cloud** : Pour passer en Pay-as-you-go, vous pouvez utiliser une carte bancaire internationale Visa/Mastercard (les cartes virtuelles prépayées comme Djamo, UBA, ou Revolut sont généralement acceptées pour les transactions en ligne).\n- **Gestion des coûts** : Définissez un plafond budgétaire (budget alert) dans Google Cloud pour maîtriser vos dépenses.\n\nN'hésitez pas à me poser d'autres questions sur la configuration.`;
+      } else {
+        fallbackReply = `C'est une excellente interrogation. En tant que Sadio, votre avatar robot cybernétique, je prends note de votre question concernant : « *${lastUserMsg}* ».\n\nMes relais de calcul ont rencontré une brève latence réseau sur les serveurs centraux de Google. Je vous invite à renouveler votre question dans un instant, ou à vérifier la connexion si le problème persiste.`;
+      }
     }
 
     // Stream fallback reply letter by letter / word by word for natural animation & speech

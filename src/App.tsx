@@ -21,7 +21,14 @@ import {
   Play,
   Pause,
   Cpu,
+  Copy,
+  Check,
+  X,
+  Plus,
+  Image as ImageIcon,
 } from 'lucide-react';
+import { processImageFile, formatFileSize, ProcessedImage } from './utils/imageCompressor';
+import { ChatMessageItem } from './components/ChatMessageItem';
 
 const GREETING_SPOKEN_TEXT =
   "Bonjour et bienvenue ! Je suis Sadio, votre robot intelligent. C'est un réel plaisir de vous accueillir. Je suis prêt pour toutes vos questions. Comment puis-je vous aider aujourd'hui ?";
@@ -55,7 +62,7 @@ export default function App() {
   const [streamingContent, setStreamingContent] = useState('');
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
-  // Pure Voice Mode: Hide response text on screen (defaults to false so user sees answers)
+  // Pure Voice Mode: Hide response text on screen (defaults to true so answers are spoken by voice without text clutter on screen)
   const [hideResponseText, setHideResponseText] = useState<boolean>(() => {
     try {
       const saved = safeStorage.getItem(HIDE_TEXT_KEY);
@@ -63,10 +70,17 @@ export default function App() {
     } catch {
       // ignore
     }
-    return false;
+    return true;
   });
 
   const [chatErrorMessage, setChatErrorMessage] = useState<string | null>(null);
+  const [isResponseCardDismissed, setIsResponseCardDismissed] = useState<boolean>(false);
+  const [copiedResponse, setCopiedResponse] = useState<boolean>(false);
+
+  // Gemini Vision Image analysis state
+  const [selectedImage, setSelectedImage] = useState<ProcessedImage | null>(null);
+  const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toggleHideResponseText = () => {
     setHideResponseText((prev) => {
@@ -238,44 +252,49 @@ export default function App() {
       setIsGreeting(true);
       greetingTriggeredRef.current = true;
 
-      if (voiceEnabled && forcePlayAudio) {
+      const safetyTimeout = setTimeout(() => {
+        setRobotState('idle');
+        setIsGreeting(false);
+      }, 5000);
+
+      if (voiceEnabled && forcePlayAudio && typeof window !== 'undefined' && window.speechSynthesis) {
         greetingAudioPlayedRef.current = true;
         unlockAudioContext();
         setRobotState('speaking');
-        speak(GREETING_SPOKEN_TEXT, 'fr-FR', () => {
+        try {
+          speak(GREETING_SPOKEN_TEXT, 'fr-FR', () => {
+            clearTimeout(safetyTimeout);
+            setRobotState('idle');
+            setTimeout(() => {
+              setIsGreeting(false);
+            }, 1000);
+          });
+        } catch {
+          clearTimeout(safetyTimeout);
           setRobotState('idle');
-          setTimeout(() => {
-            setIsGreeting(false);
-          }, 3500);
-        });
+          setIsGreeting(false);
+        }
       } else {
         setTimeout(() => {
+          clearTimeout(safetyTimeout);
           setIsGreeting(false);
           setRobotState('idle');
-        }, 5000);
+        }, 2500);
       }
     },
     [voiceEnabled, speak, unlockAudioContext]
   );
 
-  // Automatic warm greeting upon entering the app + gesture unlock fallback for mobile
+  // Automatic warm greeting upon entering the app + immediate fallback for mobile
   useEffect(() => {
-    const isMobile =
-      typeof navigator !== 'undefined' &&
-      /mobi|iphone|ipad|android|iemobile/i.test(navigator.userAgent);
-
     let autoGreetTimer: number | null = null;
 
-    // On desktop browsers with autoplay permission, attempt auto-greet after 700ms
-    if (!isMobile) {
-      autoGreetTimer = window.setTimeout(() => {
-        if (!greetingAudioPlayedRef.current) {
-          triggerWarmGreeting(true);
-        }
-      }, 700);
-    }
+    autoGreetTimer = window.setTimeout(() => {
+      if (!greetingAudioPlayedRef.current) {
+        triggerWarmGreeting(true);
+      }
+    }, 400);
 
-    // On mobile (and when autoplay is blocked): first touch on the screen immediately unlocks and plays greeting!
     const handleFirstGesture = () => {
       unlockAudioContext();
       if (!greetingAudioPlayedRef.current) {
@@ -283,10 +302,10 @@ export default function App() {
       }
     };
 
-    window.addEventListener('pointerdown', handleFirstGesture, { passive: true });
-    window.addEventListener('touchstart', handleFirstGesture, { passive: true });
-    window.addEventListener('click', handleFirstGesture, { passive: true });
-    window.addEventListener('keydown', handleFirstGesture, { passive: true });
+    window.addEventListener('pointerdown', handleFirstGesture, { passive: true, once: true });
+    window.addEventListener('touchstart', handleFirstGesture, { passive: true, once: true });
+    window.addEventListener('click', handleFirstGesture, { passive: true, once: true });
+    window.addEventListener('keydown', handleFirstGesture, { passive: true, once: true });
 
     return () => {
       if (autoGreetTimer) clearTimeout(autoGreetTimer);
@@ -395,16 +414,52 @@ export default function App() {
     }
   }, [isListening, isSpeaking, isThinking, isStreaming, isGreeting]);
 
+  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Reset so user can re-select same file if needed
+    e.target.value = '';
+
+    // Strict validation: images only
+    if (!file.type.startsWith('image/')) {
+      setChatErrorMessage(
+        "Seules les images (PNG, JPG, WEBP, GIF, HEIC) sont acceptées pour l'analyse visuelle par Sadio."
+      );
+      return;
+    }
+
+    try {
+      setIsProcessingImage(true);
+      setChatErrorMessage(null);
+      const processed = await processImageFile(file);
+      setSelectedImage(processed);
+      inputRef.current?.focus();
+    } catch (err: any) {
+      setChatErrorMessage(err?.message || "Erreur lors du traitement de l'image.");
+    } finally {
+      setIsProcessingImage(false);
+    }
+  };
+
   // Handle Send Message with INSTANT speech response & instant interrupt capability
   const handleSendMessage = async (textToSend?: string) => {
-    const prompt = (textToSend || input).trim();
-    if (!prompt) return;
+    const rawPrompt = (textToSend || input).trim();
+    const imageToSend = selectedImage;
+
+    // Must have prompt or image
+    if (!rawPrompt && !imageToSend) return;
+
+    const prompt =
+      rawPrompt ||
+      "Analyse cette image de manière complète, approfondie et détaillée. Décris tout ce que tu observes, identifie les éléments clés, retranscris et interprète les textes éventuels, et fournis une explication claire et structurée.";
 
     setChatErrorMessage(null);
 
     // If subscription is strictly expired for an authenticated user, prompt renewal
     if (token && access && !access.hasAccess) {
       setInput('');
+      setSelectedImage(null);
       setIsSubscriptionModalOpen(true);
       const expiredMessage: ChatMessage = {
         id: `bot-exp-${Date.now()}`,
@@ -425,14 +480,26 @@ export default function App() {
     abortControllerRef.current = abortController;
 
     setInput('');
+    setSelectedImage(null);
+    setIsResponseCardDismissed(false);
+    inputRef.current?.blur();
     unlockAudioContext();
 
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
-      content: prompt,
+      content: rawPrompt || "Analyse complète et détaillée de l'image",
       timestamp: Date.now(),
-      domain: currentDomain.label,
+      domain: imageToSend ? "Vision d'Image" : currentDomain.label,
+      image: imageToSend
+        ? {
+            dataUrl: imageToSend.dataUrl,
+            mimeType: imageToSend.mimeType,
+            name: imageToSend.name,
+            size: imageToSend.size,
+            base64: imageToSend.base64,
+          }
+        : undefined,
     };
 
     // Clean history from synchronous messagesRef so history is always pristine
@@ -476,8 +543,17 @@ export default function App() {
         messages: newMessages.map((m) => ({
           role: m.role,
           content: m.content,
+          image: m.image
+            ? {
+                dataUrl: m.image.dataUrl,
+                mimeType: m.image.mimeType,
+                name: m.image.name,
+              }
+            : undefined,
         })),
-        customInstructions: `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
+        customInstructions: imageToSend
+          ? `L'utilisateur a soumis une image pour analyse visuelle complète et détaillée. Analyse méticuleusement chaque élément visible, le sujet, le texte OCR éventuel, l'explication et la synthèse.`
+          : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
       };
 
       console.log('🤖 [SADIO DEBUG] Envoi de la requête /api/chat :', {
@@ -739,62 +815,128 @@ export default function App() {
   const renderChatInput = (maxWidthClass = 'max-w-3xl') => (
     <div className="w-full p-2.5 sm:p-4 bg-slate-950/90 border-t border-slate-800/80 shrink-0 backdrop-blur-md pb-safe">
       <div className={`${maxWidthClass} mx-auto relative flex flex-col gap-1.5 sm:gap-2`}>
-        <div className="relative flex items-center rounded-2xl bg-slate-900/90 border border-slate-700/80 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-xl transition-all">
-          <textarea
-            ref={inputRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Posez votre question à Sadio (vocal ou texte)..."
-            rows={1}
-            className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-3.5 sm:pl-4 pr-24 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
-          />
-
-          <div className="absolute right-1.5 sm:right-2 flex items-center gap-1">
-            {/* Voice speech-to-text mic */}
-            {isSpeechSupported && (
+        <div className="relative flex flex-col rounded-2xl bg-slate-900/90 border border-slate-700/80 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-xl transition-all overflow-hidden">
+          {/* Selected image preview chip */}
+          {selectedImage && (
+            <div className="flex items-center gap-2.5 px-3 py-2 bg-slate-950/95 border-b border-cyan-500/30 animate-fade-in">
+              <div className="relative group shrink-0">
+                <img
+                  src={selectedImage.dataUrl}
+                  alt="Aperçu de l'image"
+                  className="w-10 h-10 sm:w-11 sm:h-11 object-cover rounded-lg border border-cyan-500/50 shadow-md"
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span className="truncate">Image prête • Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash</span>
+                </div>
+                <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                  {selectedImage.name || 'Image'} • {formatFileSize(selectedImage.size)} • Vision Haute Précision
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={toggleListening}
-                title={isListening ? 'Arrêter la dictée vocale' : 'Parler au robot (Microphone)'}
-                className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${
-                  isListening
-                    ? 'bg-rose-500 text-white animate-pulse shadow-md shadow-rose-500/30'
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                onClick={() => setSelectedImage(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0"
+                title="Retirer cette image"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+
+          <div className="relative flex items-center w-full min-h-[44px]">
+            {/* Left "+" Button for Image Analysis */}
+            <div className="pl-1.5 sm:pl-2 flex items-center shrink-0">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isProcessingImage}
+                title="Analyser une image avec Sadio (Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash)"
+                className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 border ${
+                  selectedImage
+                    ? 'bg-cyan-500 text-slate-950 border-cyan-300 font-bold shadow-md shadow-cyan-500/30'
+                    : 'text-cyan-400 bg-cyan-950/40 hover:bg-cyan-500/20 border-cyan-500/40 hover:border-cyan-400/70 shadow-sm'
                 }`}
               >
-                {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                {isProcessingImage ? (
+                  <Cpu className="w-4 h-4 animate-spin text-cyan-300" />
+                ) : (
+                  <Plus className="w-5 h-5 transition-transform duration-200 hover:rotate-90" />
+                )}
               </button>
-            )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/*"
+                className="hidden"
+                onChange={handleImageSelect}
+              />
+            </div>
 
-            {/* If user hasn't typed anything and Sadio is thinking/streaming/speaking, show Stop button */}
-            {!input.trim() && (isStreaming || isThinking || isSpeaking) ? (
-              <button
-                type="button"
-                onClick={handleStop}
-                className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white shadow-md shadow-rose-600/25 transition-all active:scale-95 animate-pulse"
-                title="Arrêter la réponse et la lecture"
-              >
-                <Square className="w-4 h-4 fill-current" />
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => handleSendMessage()}
-                disabled={!input.trim()}
-                className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-md shadow-cyan-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
-                title="Envoyer la question"
-              >
-                <Send className="w-4 h-4" />
-              </button>
-            )}
+            <textarea
+              ref={inputRef}
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                selectedImage
+                  ? "Question sur l'image ou [Entrée] pour analyse complète..."
+                  : "Posez votre question à Sadio (vocal ou texte)..."
+              }
+              rows={1}
+              className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-2 sm:pl-3 pr-24 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
+            />
+
+            <div className="absolute right-1.5 sm:right-2 flex items-center gap-1">
+              {/* Voice speech-to-text mic */}
+              {isSpeechSupported && (
+                <button
+                  type="button"
+                  onClick={toggleListening}
+                  title={isListening ? 'Arrêter la dictée vocale' : 'Parler au robot (Microphone)'}
+                  className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${
+                    isListening
+                      ? 'bg-rose-500 text-white animate-pulse shadow-md shadow-rose-500/30'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                  }`}
+                >
+                  {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+              )}
+
+              {/* If user hasn't typed anything and Sadio is thinking/streaming/speaking, show Stop button */}
+              {!input.trim() && !selectedImage && (isStreaming || isThinking || isSpeaking) ? (
+                <button
+                  type="button"
+                  onClick={handleStop}
+                  className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white shadow-md shadow-rose-600/25 transition-all active:scale-95 animate-pulse"
+                  title="Arrêter la réponse et la lecture"
+                >
+                  <Square className="w-4 h-4 fill-current" />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => handleSendMessage()}
+                  disabled={!input.trim() && !selectedImage}
+                  className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-md shadow-cyan-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
+                  title={selectedImage ? "Lancer l'analyse de l'image" : "Envoyer la question"}
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         <div className="flex items-center justify-between px-1.5 sm:px-2 text-[10px] sm:text-[11px] text-slate-500">
           <span className="flex items-center gap-1 truncate">
             <Sparkles className="w-3 h-3 text-cyan-400 shrink-0" />
-            <span className="truncate">Avatar robot debout • Réponses exhaustives & complètes</span>
+            <span className="truncate">
+              Bouton [+] pour analyser des images • Modèle Vision Recommandé : Gemini 2.0 Flash / 1.5 Flash
+            </span>
           </span>
           <span className="font-mono text-[10px] text-slate-400 shrink-0 hidden sm:inline">
             [Entrée] pour envoyer
@@ -804,6 +946,11 @@ export default function App() {
     </div>
   );
 
+  const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+  const latestBotMessage = [...messages].reverse().find((m) => m.role === 'model' && m.id !== 'init-msg-1');
+  const activeAnswerText = isStreaming ? streamingContent : (latestBotMessage?.content || '');
+  const hasAnswerToShow = Boolean(activeAnswerText && activeAnswerText.trim().length > 0 && !isResponseCardDismissed && !hideResponseText);
+
   return (
     <div className="flex flex-col h-[100dvh] min-h-[100dvh] w-full bg-[#070b14] text-slate-100 overflow-hidden font-sans">
       {/* Top Header */}
@@ -811,8 +958,6 @@ export default function App() {
         onOpenSettings={() => setIsSettingsOpen(true)}
         onResetChat={handleClearMessages}
         theme={theme}
-        hideResponseText={hideResponseText}
-        onToggleHideResponseText={toggleHideResponseText}
         user={user}
         access={access}
         onOpenAuth={() => setIsAuthModalOpen(true)}
@@ -900,13 +1045,7 @@ export default function App() {
             <StandingRobotAvatar
               state={robotState}
               theme={theme}
-              voiceEnabled={voiceEnabled}
-              onToggleVoice={() => {
-                if (voiceEnabled) stopSpeech();
-                setVoiceEnabled(!voiceEnabled);
-              }}
               onAvatarClick={handleAvatarInteractiveClick}
-              onTestVoice={testVoice}
               isThinking={isThinking}
               thinkingCountdown={isThinking ? thinkingSeconds : null}
               isGreeting={isGreeting}
@@ -959,45 +1098,133 @@ export default function App() {
             </div>
           )}
 
-          {/* Floating Audio Speech Controller when Sadio is speaking aloud */}
-          {isSpeaking && !isThinking && (
-            <div className="absolute bottom-3 sm:bottom-4 z-30 flex items-center gap-2 px-3.5 py-2 rounded-full bg-slate-900/95 border border-cyan-500/50 shadow-2xl backdrop-blur-md text-xs animate-fade-in">
-              <span className="flex h-2.5 w-2.5 relative shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500" />
-              </span>
-              <span className="text-cyan-300 font-medium truncate max-w-[170px] xs:max-w-[220px] sm:max-w-xs md:max-w-md text-[11px]">
-                {hideResponseText ? 'Sadio vous répond à voix haute...' : (currentSentence || 'Lecture de la réponse en cours...')}
-              </span>
+          {/* Cyber Response Dialogue Box: Displays Sadio's full answer clearly on screen for reading */}
+          {hasAnswerToShow && (
+            <div className="absolute inset-x-2 sm:inset-x-4 bottom-2 sm:bottom-3 z-30 max-w-2xl mx-auto rounded-2xl bg-slate-950/95 border-2 border-cyan-500/70 shadow-[0_0_35px_rgba(6,182,212,0.4)] backdrop-blur-xl animate-fade-in flex flex-col max-h-[50vh] sm:max-h-[55vh] overflow-hidden">
+              {/* Header */}
+              <div className="flex items-center justify-between px-3 py-2 bg-slate-900/90 border-b border-cyan-500/30 gap-2 shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-6 h-6 rounded-lg bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
+                    <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-xs text-white">Réponse de Sadio</span>
+                      {isStreaming && (
+                        <span className="text-[10px] font-mono text-cyan-300 animate-pulse bg-cyan-500/20 px-1.5 py-0.5 rounded border border-cyan-500/30">
+                          Rédaction en direct...
+                        </span>
+                      )}
+                    </div>
+                    {latestUserMessage && (
+                      <p className="text-[11px] text-slate-400 truncate max-w-[200px] xs:max-w-xs sm:max-w-md">
+                        Q : « {latestUserMessage.content} »
+                      </p>
+                    )}
+                  </div>
+                </div>
 
-              {/* Play / Pause & Stop Controls */}
-              <div className="flex items-center gap-1 border-l border-slate-700 pl-2 shrink-0">
-                {isPaused ? (
+                <div className="flex items-center gap-1 shrink-0">
+                  {/* Listen / Stop audio button */}
+                  {isSpeaking ? (
+                    <button
+                      onClick={handleStop}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[11px] hover:bg-rose-500/30 transition active:scale-95"
+                      title="Arrêter la voix"
+                    >
+                      <Square className="w-3 h-3 fill-current" />
+                      <span className="hidden xs:inline">Arrêter</span>
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        unlockAudioContext();
+                        speak(activeAnswerText);
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 text-[11px] font-medium hover:bg-cyan-500/30 transition active:scale-95 shadow-sm"
+                      title="Écouter la voix de Sadio"
+                    >
+                      <Volume2 className="w-3.5 h-3.5" />
+                      <span>Écouter</span>
+                    </button>
+                  )}
+
+                  {/* Copy button */}
                   <button
-                    onClick={resumeSpeech}
-                    className="p-1 rounded text-cyan-400 hover:text-white transition"
-                    title="Reprendre la lecture"
+                    onClick={() => {
+                      navigator.clipboard.writeText(activeAnswerText);
+                      setCopiedResponse(true);
+                      setTimeout(() => setCopiedResponse(false), 2000);
+                    }}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                    title="Copier le texte de la réponse"
                   >
-                    <Play className="w-3.5 h-3.5 fill-current" />
+                    {copiedResponse ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   </button>
-                ) : (
+
+                  {/* Dismiss / Close button */}
                   <button
-                    onClick={pauseSpeech}
-                    className="p-1 rounded text-cyan-400 hover:text-white transition"
-                    title="Mettre en pause"
+                    onClick={() => setIsResponseCardDismissed(true)}
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
+                    title="Masquer la boîte de réponse"
                   >
-                    <Pause className="w-3.5 h-3.5 fill-current" />
+                    <X className="w-3.5 h-3.5" />
                   </button>
-                )}
-                <button
-                  onClick={handleStop}
-                  className="p-1 rounded text-rose-400 hover:text-rose-300 transition"
-                  title="Arrêter la réponse et la lecture"
-                >
-                  <Square className="w-3.5 h-3.5 fill-current" />
-                </button>
+                </div>
+              </div>
+
+              {/* If an image was analyzed, display an image banner strip */}
+              {latestUserMessage?.image && (
+                <div className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-900/90 border-b border-cyan-500/20 text-xs shrink-0">
+                  <img
+                    src={latestUserMessage.image.dataUrl}
+                    alt="Image analysée"
+                    className="w-8 h-8 rounded-lg object-cover border border-cyan-500/40 shadow-sm shrink-0"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <span className="font-semibold text-cyan-300 text-[11px] flex items-center gap-1">
+                      <ImageIcon className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                      <span className="truncate">Image analysée par Gemini 2.0 Flash / 1.5 Flash : {latestUserMessage.image.name || 'Image'}</span>
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">
+                      {latestUserMessage.image.size ? formatFileSize(latestUserMessage.image.size) : 'Vision'} • Analyse visuelle haute précision
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Scrollable Rich Content Body */}
+              <div className="flex-1 overflow-y-auto p-3 sm:p-4 text-xs sm:text-sm text-slate-100 leading-relaxed font-sans select-text">
+                <ChatMessageItem
+                  message={{
+                    id: latestBotMessage?.id || 'live-stream',
+                    role: 'model',
+                    content: activeAnswerText,
+                    timestamp: latestBotMessage?.timestamp || Date.now(),
+                    domain: currentDomain.label,
+                  }}
+                  hideResponseText={false}
+                  isStreaming={isStreaming}
+                  onSpeak={(text) => {
+                    unlockAudioContext();
+                    speak(text);
+                  }}
+                  onStopSpeak={handleStop}
+                  isSpeakingThis={isSpeaking}
+                />
               </div>
             </div>
+          )}
+
+          {/* Re-open response pill if user dismissed the card */}
+          {isResponseCardDismissed && latestBotMessage && (
+            <button
+              onClick={() => setIsResponseCardDismissed(false)}
+              className="absolute bottom-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-cyan-500/50 text-cyan-300 text-xs shadow-lg backdrop-blur-md hover:bg-cyan-500/20 transition active:scale-95 animate-fade-in"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Afficher la réponse de Sadio</span>
+            </button>
           )}
         </div>
 
@@ -1011,17 +1238,9 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         theme={theme}
         onChangeTheme={(t) => setTheme(t)}
-        voiceEnabled={voiceEnabled}
-        onToggleVoice={() => {
-          if (voiceEnabled) stopSpeech();
-          setVoiceEnabled(!voiceEnabled);
-        }}
-        hideResponseText={hideResponseText}
-        onToggleHideResponseText={toggleHideResponseText}
         availableVoices={availableVoices}
         selectedVoice={selectedVoice}
         onSelectVoice={setSelectedVoice}
-        onTestVoice={testVoice}
         messages={messages}
         onClearMessages={handleClearMessages}
       />

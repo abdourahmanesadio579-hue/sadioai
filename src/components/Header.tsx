@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { PWAInstallButton } from './PWAInstallButton';
-import { Bot, Settings, RotateCcw, EyeOff, Eye, Sparkles, User, LogOut, Clock } from 'lucide-react';
+import { Bot, Settings, RotateCcw, Sparkles, User, LogOut, Clock } from 'lucide-react';
 import { RobotTheme } from '../types/chat';
 import { UserProfile, AccessStatus } from '../types/auth';
 
@@ -8,8 +8,6 @@ interface HeaderProps {
   onOpenSettings: () => void;
   onResetChat: () => void;
   theme: RobotTheme;
-  hideResponseText: boolean;
-  onToggleHideResponseText: () => void;
   user: UserProfile | null;
   access: AccessStatus | null;
   onOpenAuth: () => void;
@@ -20,8 +18,6 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   onResetChat,
-  hideResponseText,
-  onToggleHideResponseText,
   user,
   access,
   onOpenAuth,
@@ -113,24 +109,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         <PWAInstallButton />
 
-        <button
-          onClick={onToggleHideResponseText}
-          title={
-            hideResponseText
-              ? 'Mode Vocal Pur actif : Le texte des réponses est masqué à l’écran. Cliquer pour afficher le texte.'
-              : 'Texte des réponses affiché. Cliquer pour masquer le texte.'
-          }
-          className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-xs flex items-center gap-1.5 transition active:scale-95 ${
-            hideResponseText
-              ? 'bg-cyan-500/15 border-cyan-400/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.25)]'
-              : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-slate-200'
-          }`}
-        >
-          {hideResponseText ? <EyeOff className="w-4 h-4 text-cyan-400" /> : <Eye className="w-4 h-4" />}
-          <span className="hidden sm:inline font-medium">
-            {hideResponseText ? 'Texte masqué' : 'Texte visible'}
-          </span>
-        </button>
+
 
         <button
           onClick={onResetChat}

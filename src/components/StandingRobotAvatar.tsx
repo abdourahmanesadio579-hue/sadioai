@@ -6,10 +6,7 @@ import { Sparkles, Cpu, Volume2, VolumeX, Eye, Zap, ShieldCheck } from 'lucide-r
 interface StandingRobotAvatarProps {
   state: RobotState;
   theme?: RobotTheme;
-  voiceEnabled: boolean;
-  onToggleVoice: () => void;
   onAvatarClick?: () => void;
-  onTestVoice?: () => void;
   currentSpeechSnippet?: string;
   thinkingCountdown?: number | null;
   isThinking?: boolean;
@@ -58,10 +55,7 @@ const themeColorMap = {
 export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
   state,
   theme = 'cyan',
-  voiceEnabled,
-  onToggleVoice,
   onAvatarClick,
-  onTestVoice,
   currentSpeechSnippet,
   thinkingCountdown,
   isThinking,
@@ -195,31 +189,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
           <span className="truncate">{isCurrentlyThinking ? (thinkingCountdown && thinkingCountdown > 0 ? `Sadio réfléchit (${thinkingCountdown}s)...` : 'Sadio est en train de réfléchir...') : statusTextMap[state]}</span>
         </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
-          {onTestVoice && (
-            <button
-              onClick={onTestVoice}
-              title="Tester le son du robot"
-              className="min-h-[36px] px-2.5 py-1 rounded-xl border border-cyan-500/40 bg-slate-900/90 hover:bg-slate-800 text-cyan-300 hover:text-white transition-all text-xs font-mono flex items-center gap-1.5 active:scale-95 shadow-sm shadow-cyan-500/10"
-            >
-              <Zap className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="text-[11px] font-medium">Tester voix</span>
-            </button>
-          )}
 
-          <button
-            onClick={onToggleVoice}
-            title={voiceEnabled ? 'Désactiver la voix du robot' : 'Activer la voix parlée du robot'}
-            className={`min-h-[36px] px-2.5 py-1 rounded-xl border transition-all text-xs flex items-center gap-1.5 font-mono active:scale-95 ${
-              voiceEnabled
-                ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.4)]'
-                : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            {voiceEnabled ? <Volume2 className="w-3.5 h-3.5 shrink-0" /> : <VolumeX className="w-3.5 h-3.5 shrink-0" />}
-            <span className="text-[11px] font-medium">{voiceEnabled ? 'Voix ON' : 'Voix OFF'}</span>
-          </button>
-        </div>
       </div>
 
       {/* HOLOGRAPHIC THOUGHT, SPEECH & WARM WELCOME BALLOON DIRECTLY BESIDE THE ROBOT */}
@@ -230,7 +200,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -10, scale: 0.95 }}
             transition={{ type: 'spring', damping: 22, stiffness: 280 }}
-            className="absolute z-40 left-2 right-2 sm:left-[55%] sm:right-auto top-10 sm:top-11 max-w-[calc(100%-16px)] sm:max-w-[280px] md:max-w-[320px] p-2.5 sm:p-3.5 rounded-2xl bg-slate-900/95 border-2 border-cyan-400 shadow-[0_0_30px_rgba(6,182,212,0.55)] backdrop-blur-xl pointer-events-auto"
+            className="absolute z-40 left-2 right-2 sm:left-[55%] sm:right-auto top-10 sm:top-11 max-w-[calc(100%-16px)] sm:max-w-[280px] md:max-w-[320px] max-h-[75vh] overflow-y-auto no-scrollbar p-2.5 sm:p-3.5 rounded-2xl bg-slate-900/95 border-2 border-cyan-400 shadow-[0_0_30px_rgba(6,182,212,0.55)] backdrop-blur-xl pointer-events-auto"
           >
             {/* Thought pointer towards Sadio on desktop/tablets */}
             <div className="hidden sm:block absolute -left-2 top-5 w-3.5 h-3.5 bg-slate-900 border-l-2 border-b-2 border-cyan-400 rotate-45" />
@@ -344,9 +314,15 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                   })}
                 </div>
 
-                <div className="text-[10px] text-slate-300 text-center font-mono">
-                  Écoutez la réponse vocale du robot
-                </div>
+                {currentSpeechSnippet ? (
+                  <p className="text-xs text-slate-100 font-sans leading-relaxed bg-slate-950/70 p-2.5 rounded-xl border border-cyan-500/30 max-h-[140px] overflow-y-auto no-scrollbar">
+                    « {currentSpeechSnippet} »
+                  </p>
+                ) : (
+                  <div className="text-[10px] text-slate-300 text-center font-mono">
+                    Écoutez la réponse vocale du robot
+                  </div>
+                )}
               </div>
             )}
           </motion.div>

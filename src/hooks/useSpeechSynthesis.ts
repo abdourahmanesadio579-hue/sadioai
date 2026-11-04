@@ -177,8 +177,18 @@ export function useSpeechSynthesis() {
   const [isPaused, setIsPaused] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-  const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(null);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>(() => {
+    if (typeof window !== 'undefined' && Array.isArray((window as any).__sadio_available_voices)) {
+      return (window as any).__sadio_available_voices;
+    }
+    return [];
+  });
+  const [selectedVoice, setSelectedVoice] = useState<SpeechSynthesisVoice | null>(() => {
+    if (typeof window !== 'undefined' && (window as any).__sadio_best_french_voice) {
+      return (window as any).__sadio_best_french_voice;
+    }
+    return null;
+  });
   const [currentSentence, setCurrentSentence] = useState<string>('');
   const [speechError, setSpeechError] = useState<string | null>(null);
 
@@ -384,10 +394,14 @@ export function useSpeechSynthesis() {
       updateVoices();
       synth.onvoiceschanged = updateVoices;
 
-      const timer = setTimeout(updateVoices, 300);
+      const t1 = setTimeout(updateVoices, 30);
+      const t2 = setTimeout(updateVoices, 100);
+      const t3 = setTimeout(updateVoices, 250);
 
       return () => {
-        clearTimeout(timer);
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
         synth.cancel();
       };
     } else {
@@ -519,6 +533,19 @@ export function useSpeechSynthesis() {
     // Only assign selectedVoice if it is a validated French voice
     if (selectedVoice) {
       utterance.voice = selectedVoice;
+    } else if (synthRef.current) {
+      try {
+        const liveVoices = synthRef.current.getVoices();
+        const liveFrench = liveVoices.find((v) => {
+          const l = (v.lang || '').toLowerCase();
+          return l.startsWith('fr') || l.includes('french') || l.includes('français');
+        });
+        if (liveFrench) {
+          utterance.voice = liveFrench;
+        }
+      } catch {
+        // ignore
+      }
     }
 
     // Strong window reference to prevent mobile garbage collector from reaping active utterance
@@ -724,9 +751,9 @@ export function useSpeechSynthesis() {
     [playNextInQueue]
   );
 
-  // Play full text at once (for "Écouter" button on message history)
-  const speak = useCallback(
-    (rawText: string, _lang = 'fr-FR', onEnd?: () => void) => {
+  // Instant pre-cached greeting playback using early HTML index.html pre-warmed utterance
+  const speakGreeting = useCallback(
+    (text: string, onEnd?: () => void) => {
       if (!synthRef.current) {
         onEnd?.();
         return;
@@ -741,6 +768,134 @@ export function useSpeechSynthesis() {
       if (synthRef.current.speaking || synthRef.current.pending) {
         try {
           synthRef.current.cancel();
+          synthRef.current.resume();
+        } catch {
+          // ignore
+        }
+      }
+
+      isCanceledRef.current = false;
+      isPlayingRef.current = true;
+      isStreamingEndedRef.current = true;
+      queueRef.current = [];
+      activeUtterancesRef.current = [];
+
+      // Check pre-warmed utterance from index.html cache
+      let utterance: SpeechSynthesisUtterance | null = null;
+      if (typeof window !== 'undefined' && (window as any).__sadio_cached_greeting_utterance) {
+        utterance = (window as any).__sadio_cached_greeting_utterance;
+      }
+
+      if (!utterance) {
+        utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = selectedVoice?.lang || 'fr-FR';
+        utterance.rate = speechRateRef.current || 1.0;
+        utterance.pitch = speechPitchRef.current || 1.0;
+        utterance.volume = 1.0;
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+        }
+      } else {
+        utterance.rate = speechRateRef.current || 1.0;
+        utterance.pitch = speechPitchRef.current || 1.0;
+        if (selectedVoice) {
+          utterance.voice = selectedVoice;
+        }
+      }
+
+      setCurrentSentence(text);
+      setIsSpeaking(true);
+      setIsPaused(false);
+      setSpeechError(null);
+
+      if (typeof window !== 'undefined') {
+        const win = window as any;
+        win.__activeSpeechUtterances = win.__activeSpeechUtterances || [];
+        win.__activeSpeechUtterances.push(utterance);
+      }
+      activeUtterancesRef.current = [utterance];
+
+      utterance.onstart = () => {
+        isVoicingRef.current = true;
+        setIsVoicing(true);
+        setIsSpeaking(true);
+        setIsPaused(false);
+        setSpeechError(null);
+        setCurrentSentence(text);
+        lastWordBoundaryRef.current = performance.now();
+      };
+
+      utterance.onboundary = (e) => {
+        if (e.name === 'word') {
+          lastWordBoundaryRef.current = performance.now();
+        }
+      };
+
+      utterance.onend = () => {
+        activeUtterancesRef.current = [];
+        isVoicingRef.current = false;
+        setIsVoicing(false);
+        mouthOpenRef.current = 0;
+        setMouthOpenLevel(0);
+        isPlayingRef.current = false;
+        setIsSpeaking(false);
+        setIsPaused(false);
+        setCurrentSentence('');
+        onEnd?.();
+      };
+
+      utterance.onerror = (e) => {
+        console.warn('Greeting playback error:', e.error);
+        activeUtterancesRef.current = [];
+        isVoicingRef.current = false;
+        setIsVoicing(false);
+        isPlayingRef.current = false;
+        setIsSpeaking(false);
+        setCurrentSentence('');
+        onEnd?.();
+      };
+
+      try {
+        synthRef.current.speak(utterance);
+        if (synthRef.current.paused) {
+          synthRef.current.resume();
+        }
+      } catch (err) {
+        console.error('Error invoking speakGreeting:', err);
+        onEnd?.();
+      }
+    },
+    [selectedVoice]
+  );
+
+  // Play full text at once (for "Écouter" button on message history)
+  const speak = useCallback(
+    (rawText: string, _lang = 'fr-FR', onEnd?: () => void) => {
+      // If the text is the greeting, route immediately to pre-cached speakGreeting
+      if (
+        rawText.includes("SADIO, votre avatar robot") ||
+        rawText.includes("Sadio, votre avatar robot") ||
+        (typeof window !== 'undefined' && rawText === (window as any).__SADIO_GREETING_TEXT)
+      ) {
+        speakGreeting(rawText, onEnd);
+        return;
+      }
+
+      if (!synthRef.current) {
+        onEnd?.();
+        return;
+      }
+
+      unlockAudioContext();
+
+      if (synthRef.current.paused) {
+        synthRef.current.resume();
+      }
+
+      if (synthRef.current.speaking || synthRef.current.pending) {
+        try {
+          synthRef.current.cancel();
+          synthRef.current.resume();
         } catch {
           // ignore
         }
@@ -805,7 +960,7 @@ export function useSpeechSynthesis() {
 
   const testVoice = useCallback(() => {
     unlockAudioContext();
-    speak("Bonjour ! Je suis Sadio. Ma voix est désormais claire, fluide et naturelle.");
+    speak("Bonjour ! Je suis SADIO. Ma voix est désormais claire, fluide et naturelle.");
   }, [speak]);
 
   return {
@@ -829,6 +984,7 @@ export function useSpeechSynthesis() {
     enqueueStreamingSentence,
     finishStreamingSpeech,
     speak,
+    speakGreeting,
     pause,
     resume,
     stop,

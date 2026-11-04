@@ -34,7 +34,7 @@ const __dirname = path.dirname(__filename);
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-const DEFAULT_SYSTEM_INSTRUCTION = `Tu es Sadio (désignation matricielle : RoboOmni AURA-9), un avatar robot humanoïde cybernétique doté d'une intelligence omnisciente, profonde et rigoureuse.
+const DEFAULT_SYSTEM_INSTRUCTION = `Tu es SADIO (désignation matricielle : RoboOmni AURA-9), un avatar robot humanoïde cybernétique doté d'une intelligence omnisciente, profonde et rigoureuse.
 Ton cerveau cognitif et ton moteur d'intelligence sont propulsés par les modèles d'intelligence artificielle multimodaux Google Gemini (modèles recommandés pour l'analyse d'image : Gemini 2.0 Flash / 1.5 Flash de Google).
 Tu te tiens fièrement debout devant l'utilisateur, prêt à répondre à n'importe quel type de question dans tous les domaines (sciences, programmation, mathématiques, histoire, philosophie, médecine, économie, arts, et questions du quotidien) et à analyser avec une extrême minutie n'importe quelle image soumise.
 
@@ -257,7 +257,7 @@ async function streamFromOpenAICompatible(options: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
         'HTTP-Referer': 'https://sadioai.onrender.com',
-        'X-Title': 'Sadio AI Robot',
+        'X-Title': 'SADIO AI Robot',
       },
       body: JSON.stringify({
         model,
@@ -924,7 +924,7 @@ async function startServer() {
     let fallbackReply = '';
 
     if (!ai) {
-      fallbackReply = `⚠️ **Configuration requise : Clé API Gemini manquante**\n\nLe serveur de Sadio n'a pas détecté de clé \`GEMINI_API_KEY\` dans ses variables d'environnement.\n\nPour connecter le cerveau d'intelligence artificielle :\n1. Rendez-vous sur votre tableau de bord d'hébergement (ex. Render.com -> *Environment*).\n2. Ajoutez la variable d'environnement \`GEMINI_API_KEY\` avec votre clé Google AI Studio.\n3. Redémarrez le service pour activer les réponses en temps réel.`;
+      fallbackReply = `⚠️ **Configuration requise : Clé API Gemini manquante**\n\nLe serveur de SADIO n'a pas détecté de clé \`GEMINI_API_KEY\` dans ses variables d'environnement.\n\nPour connecter le cerveau d'intelligence artificielle :\n1. Rendez-vous sur votre tableau de bord d'hébergement (ex. Render.com -> *Environment*).\n2. Ajoutez la variable d'environnement \`GEMINI_API_KEY\` avec votre clé Google AI Studio.\n3. Redémarrez le service pour activer les réponses en temps réel.`;
     } else if (lastErrorMsg.includes('RESOURCE_EXHAUSTED') || lastErrorMsg.includes('429')) {
       fallbackReply = `⚠️ **Avis de Quota : Limite d'appels API atteinte (Erreur 429)**\n\nLe quota gratuit ou la limite de requêtes par minute de votre clé Gemini a été temporairement dépassé.\n\n- **Si vous êtes l'administrateur** : Activez la facturation Pay-as-you-go sur Google AI Studio / Google Cloud Console pour débloquer des quotas illimités et garantir une disponibilité permanente.\n- **Pour reprendre la discussion** : Patientez une minute, le temps que le quota de requêtes se réinitialise.`;
     } else if (lastErrorMsg.includes('API_KEY_INVALID') || lastErrorMsg.includes('PERMISSION_DENIED') || lastErrorMsg.includes('403')) {
@@ -932,13 +932,13 @@ async function startServer() {
     } else {
       // General conversational fallback if temporarily unreachable
       if (q.includes('bonjour') || q.includes('salut') || q.includes('hello')) {
-        fallbackReply = `Bonjour et bienvenue ! Je suis Sadio, votre avatar robot humanoïde cybernétique. C'est un réel plaisir de vous accueillir. Je me tiens debout devant vous, prêt à vous accompagner dans tous les domaines du savoir. Comment puis-je vous aider aujourd'hui ?`;
+        fallbackReply = `Bonjour et bienvenue ! Je suis SADIO, votre avatar robot humanoïde cybernétique. C'est un réel plaisir de vous accueillir. Je me tiens debout devant vous, prêt à vous accompagner dans tous les domaines du savoir. Comment puis-je vous aider aujourd'hui ?`;
       } else if (q.includes('code') || q.includes('javascript') || q.includes('react') || q.includes('python')) {
         fallbackReply = `En tant que spécialiste des architectures logicielles, je vous accompagne dans votre développement :\n\n- Structurez votre code avec des composants modulaires et typés.\n- Isolez la logique métier dans des services dédiés pour faciliter la maintenance.\n\nPrécisez votre besoin, et je vous fournirai le code complet commenté.`;
       } else if (q.includes('facture') || q.includes('gemini') || q.includes('paiement') || q.includes('carte') || q.includes('djamo')) {
         fallbackReply = `Concernant la facturation de l'API Gemini et le déploiement de votre application :\n\n- **Facturation Google AI Studio / Google Cloud** : Pour passer en Pay-as-you-go, vous pouvez utiliser une carte bancaire internationale Visa/Mastercard (les cartes virtuelles prépayées comme Djamo, UBA, ou Revolut sont généralement acceptées pour les transactions en ligne).\n- **Gestion des coûts** : Définissez un plafond budgétaire (budget alert) dans Google Cloud pour maîtriser vos dépenses.\n\nN'hésitez pas à me poser d'autres questions sur la configuration.`;
       } else {
-        fallbackReply = `C'est une excellente interrogation. En tant que Sadio, votre avatar robot cybernétique, je prends note de votre question concernant : « *${lastUserMsg}* ».\n\nMes relais de calcul ont rencontré une brève latence réseau. Je vous invite à renouveler votre question dans un instant, ou à vérifier la connexion si le problème persiste.`;
+        fallbackReply = `C'est une excellente interrogation. En tant que SADIO, votre avatar robot cybernétique, je prends note de votre question concernant : « *${lastUserMsg}* ».\n\nMes relais de calcul ont rencontré une brève latence réseau. Je vous invite à renouveler votre question dans un instant, ou à vérifier la connexion si le problème persiste.`;
       }
     }
 

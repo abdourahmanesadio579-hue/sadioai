@@ -31,14 +31,14 @@ import { processImageFile, formatFileSize, ProcessedImage } from './utils/imageC
 import { ChatMessageItem } from './components/ChatMessageItem';
 
 const GREETING_SPOKEN_TEXT =
-  "Bonjour et bienvenue ! Je suis Sadio, votre robot intelligent. C'est un réel plaisir de vous accueillir. Je suis prêt pour toutes vos questions. Comment puis-je vous aider aujourd'hui ?";
+  "Bonjour ! Je suis SADIO, votre avatar robot intelligent. Comment puis-je vous aider aujourd'hui ?";
 
 const INITIAL_BOT_MESSAGE: ChatMessage = {
   id: 'init-msg-1',
   role: 'model',
   content: `👋 **Bonjour et bienvenue ! C'est un réel et sincère plaisir de vous accueillir.**
 
-Je suis **Sadio**, votre avatar robot intelligent. Je me tiens debout au centre de votre écran, entièrement dédié à vous accompagner et à répondre à toutes vos interrogations avec précision, rigueur et exhaustivité.
+Je suis **SADIO**, votre avatar robot intelligent. Je me tiens debout au centre de votre écran, entièrement dédié à vous accompagner et à répondre à toutes vos interrogations avec précision, rigueur et exhaustivité.
 
 Posez votre question ci-dessous ou cliquez sur le micro pour me parler directement !`,
   timestamp: Date.now(),
@@ -244,6 +244,7 @@ export default function App() {
     enqueueStreamingSentence,
     finishStreamingSpeech,
     speak,
+    speakGreeting,
     pause: pauseSpeech,
     resume: resumeSpeech,
     stop: stopSpeech,
@@ -263,67 +264,70 @@ export default function App() {
       setIsGreeting(true);
       greetingTriggeredRef.current = true;
 
-      const safetyTimeout = setTimeout(() => {
-        setRobotState('idle');
-        setIsGreeting(false);
-      }, 5000);
-
-      if (voiceEnabled && forcePlayAudio && typeof window !== 'undefined' && window.speechSynthesis) {
-        greetingAudioPlayedRef.current = true;
-        unlockAudioContext();
-        setRobotState('speaking');
-        try {
-          speak(GREETING_SPOKEN_TEXT, 'fr-FR', () => {
-            clearTimeout(safetyTimeout);
-            setRobotState('idle');
-            setTimeout(() => {
-              setIsGreeting(false);
-            }, 1000);
-          });
-        } catch {
-          clearTimeout(safetyTimeout);
-          setRobotState('idle');
-          setIsGreeting(false);
-        }
-      } else {
+      if (!voiceEnabled || !forcePlayAudio || typeof window === 'undefined' || !window.speechSynthesis) {
         setTimeout(() => {
-          clearTimeout(safetyTimeout);
           setIsGreeting(false);
           setRobotState('idle');
-        }, 2500);
+        }, 2000);
+        return;
+      }
+
+      unlockAudioContext();
+      setRobotState('speaking');
+
+      let finished = false;
+      const onGreetingDone = () => {
+        if (finished) return;
+        finished = true;
+        greetingAudioPlayedRef.current = true;
+        setRobotState('idle');
+        setTimeout(() => {
+          setIsGreeting(false);
+        }, 1200);
+      };
+
+      const safetyTimer = setTimeout(onGreetingDone, 5500);
+
+      try {
+        speakGreeting(GREETING_SPOKEN_TEXT, () => {
+          clearTimeout(safetyTimer);
+          onGreetingDone();
+        });
+      } catch {
+        clearTimeout(safetyTimer);
+        onGreetingDone();
       }
     },
-    [voiceEnabled, speak, unlockAudioContext]
+    [voiceEnabled, speakGreeting, unlockAudioContext]
   );
 
-  // Automatic warm greeting upon entering the app + immediate fallback for mobile
+  // Automatic warm greeting upon entering the app + INSTANT trigger on first touch/click
   useEffect(() => {
-    let autoGreetTimer: number | null = null;
+    // 1. Try immediate playback at 60ms for desktop and environments allowing autoplay
+    const autoGreetTimer = window.setTimeout(() => {
+      triggerWarmGreeting(true);
+    }, 60);
 
-    autoGreetTimer = window.setTimeout(() => {
-      if (!greetingAudioPlayedRef.current) {
-        triggerWarmGreeting(true);
-      }
-    }, 400);
-
-    const handleFirstGesture = () => {
+    // 2. On mobile (iOS / Android), if autoplay was silenced by the OS, the VERY FIRST touch anywhere
+    // immediately unlocks the audio context and launches the greeting without any lag!
+    const handleImmediateGesture = () => {
       unlockAudioContext();
       if (!greetingAudioPlayedRef.current) {
         triggerWarmGreeting(true);
       }
     };
 
-    window.addEventListener('pointerdown', handleFirstGesture, { passive: true, once: true });
-    window.addEventListener('touchstart', handleFirstGesture, { passive: true, once: true });
-    window.addEventListener('click', handleFirstGesture, { passive: true, once: true });
-    window.addEventListener('keydown', handleFirstGesture, { passive: true, once: true });
+    window.addEventListener('pointerdown', handleImmediateGesture, { passive: true, once: true });
+    window.addEventListener('touchstart', handleImmediateGesture, { passive: true, once: true });
+    window.addEventListener('click', handleImmediateGesture, { passive: true, once: true });
+    window.addEventListener('keydown', handleImmediateGesture, { passive: true, once: true });
 
     return () => {
-      if (autoGreetTimer) clearTimeout(autoGreetTimer);
-      window.removeEventListener('pointerdown', handleFirstGesture);
-      window.removeEventListener('touchstart', handleFirstGesture);
-      window.removeEventListener('click', handleFirstGesture);
-      window.removeEventListener('keydown', handleFirstGesture);
+      clearTimeout(autoGreetTimer);
+      window.removeEventListener('pointerdown', handleImmediateGesture);
+      window.removeEventListener('touchstart', handleImmediateGesture);
+      window.removeEventListener('click', handleImmediateGesture);
+      window.removeEventListener('keydown', handleImmediateGesture);
     };
   }, [triggerWarmGreeting, unlockAudioContext]);
 
@@ -435,7 +439,7 @@ export default function App() {
     // Strict validation: images only
     if (!file.type.startsWith('image/')) {
       setChatErrorMessage(
-        "Seules les images (PNG, JPG, WEBP, GIF, HEIC) sont acceptées pour l'analyse visuelle par Sadio."
+        "Seules les images (PNG, JPG, WEBP, GIF, HEIC) sont acceptées pour l'analyse visuelle par SADIO."
       );
       return;
     }
@@ -475,7 +479,7 @@ export default function App() {
       const expiredMessage: ChatMessage = {
         id: `bot-exp-${Date.now()}`,
         role: 'model',
-        content: `### ⏳ Votre essai gratuit de 3 jours est terminé\n\nPour continuer à échanger avec **Sadio** et profiter de ses explications universelles, souscrivez pour **700 FCFA (30 jours)** via Wave, Orange Money, Free Money ou Carte Bancaire.\n\nVos conversations passées restent précieusement conservées.`,
+        content: `### ⏳ Votre essai gratuit de 3 jours est terminé\n\nPour continuer à échanger avec **SADIO** et profiter de ses explications universelles, souscrivez pour **700 FCFA (30 jours)** via Wave, Orange Money, Free Money ou Carte Bancaire.\n\nVos conversations passées restent précieusement conservées.`,
         timestamp: Date.now(),
         domain: 'Abonnement',
       };
@@ -585,12 +589,27 @@ export default function App() {
       const tFetchStart = performance.now();
       console.log(`⏱️ [SADIO LATENCE] [T2 = +${(tFetchStart - tStart).toFixed(0)} ms] Expédition requête POST /api/chat...`);
 
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-        signal: abortController.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch('/api/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: abortController.signal,
+        });
+      } catch (networkErr) {
+        console.warn('⚠️ [SADIO WAKEUP] Tentative initiale échouée (réveil du serveur Render après inactivité). Nouvelle tentative dans 3s...');
+        setChatErrorMessage("⚠️ Réveil du serveur Render en cours (inactivité prolongée)... Patientez 3 secondes.");
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        setChatErrorMessage(null);
+
+        response = await fetch('/api/chat', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          signal: abortController.signal,
+        });
+      }
 
       const tHeadersReceived = performance.now();
       const fetchTransitMs = (tHeadersReceived - tFetchStart).toFixed(0);
@@ -851,7 +870,7 @@ export default function App() {
       const errorBotMessage: ChatMessage = {
         id: `bot-err-${Date.now()}`,
         role: 'model',
-        content: `### ⚠️ Message de Sadio\n\nMes relais de calcul ont rencontré une difficulté temporaire :\n\n> *${errorMsg}*\n\nVos questions précédentes sont intactes. Vous pouvez cliquer ci-dessous pour réessayer immédiatement.`,
+        content: `### ⚠️ Message de SADIO\n\nMes relais de calcul ont rencontré une difficulté temporaire :\n\n> *${errorMsg}*\n\nVos questions précédentes sont intactes. Vous pouvez cliquer ci-dessous pour réessayer immédiatement.`,
         timestamp: Date.now(),
         domain: 'Erreur',
       };
@@ -926,7 +945,7 @@ export default function App() {
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isProcessingImage}
-                title="Analyser une image avec Sadio (Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash)"
+                title="Analyser une image avec SADIO (Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash)"
                 className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 border ${
                   selectedImage
                     ? 'bg-cyan-500 text-slate-950 border-cyan-300 font-bold shadow-md shadow-cyan-500/30'
@@ -956,7 +975,7 @@ export default function App() {
               placeholder={
                 selectedImage
                   ? "Question sur l'image ou [Entrée] pour analyse complète..."
-                  : "Posez votre question à Sadio (vocal ou texte)..."
+                  : "Posez votre question à SADIO (vocal ou texte)..."
               }
               rows={1}
               className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-2 sm:pl-3 pr-24 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
@@ -979,7 +998,7 @@ export default function App() {
                 </button>
               )}
 
-              {/* If user hasn't typed anything and Sadio is thinking/streaming/speaking, show Stop button */}
+              {/* If user hasn't typed anything and SADIO is thinking/streaming/speaking, show Stop button */}
               {!input.trim() && !selectedImage && (isStreaming || isThinking || isSpeaking) ? (
                 <button
                   type="button"
@@ -1063,7 +1082,7 @@ export default function App() {
             <div className="w-full max-w-lg mx-auto flex items-start gap-2.5 p-3 rounded-2xl bg-rose-950/95 border border-rose-500/60 text-rose-200 text-xs shadow-2xl backdrop-blur-md animate-fade-in">
               <span className="text-base shrink-0">⚠️</span>
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-rose-100">Message système de Sadio</p>
+                <p className="font-semibold text-rose-100">Message système de SADIO</p>
                 <p className="text-[11px] text-rose-200/90 mt-0.5 leading-relaxed">{chatErrorMessage}</p>
                 {chatErrorMessage.includes('GEMINI_API_KEY') && (
                   <div className="mt-2 p-2 rounded-lg bg-amber-950/60 border border-amber-500/40 text-[10px] text-amber-200 leading-normal">
@@ -1072,7 +1091,7 @@ export default function App() {
                 )}
                 {chatErrorMessage.includes('404') && (
                   <div className="mt-2 p-2 rounded-lg bg-indigo-950/75 border border-indigo-500/40 text-[10px] text-indigo-200 leading-normal">
-                    🚀 <strong>Conseil hébergement (Render.com) :</strong> Sadio est une application Full-Stack (Node.js + React). Sur Render, votre service doit impérativement être créé en tant que <strong>Web Service</strong> (et non Static Site).<br/>
+                    🚀 <strong>Conseil hébergement (Render.com) :</strong> SADIO est une application Full-Stack (Node.js + React). Sur Render, votre service doit impérativement être créé en tant que <strong>Web Service</strong> (et non Static Site).<br/>
                     • Build Command : <code>npm install && npm run build</code><br/>
                     • Start Command : <code>npm start</code>
                   </div>
@@ -1148,7 +1167,7 @@ export default function App() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-xs text-white tracking-wide">
-                        Sadio analyse votre question...
+                        SADIO analyse votre question...
                       </span>
                       <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-400/40">
                         {thinkingSeconds ?? 5}s
@@ -1171,7 +1190,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Cyber Response Dialogue Box: Displays Sadio's full answer clearly on screen for reading */}
+          {/* Cyber Response Dialogue Box: Displays SADIO's full answer clearly on screen for reading */}
           {hasAnswerToShow && (
             <div className="absolute inset-x-2 sm:inset-x-4 bottom-2 sm:bottom-3 z-30 max-w-2xl mx-auto rounded-2xl bg-slate-950/95 border-2 border-cyan-500/70 shadow-[0_0_35px_rgba(6,182,212,0.4)] backdrop-blur-xl animate-fade-in flex flex-col max-h-[50vh] sm:max-h-[55vh] overflow-hidden">
               {/* Header */}
@@ -1182,7 +1201,7 @@ export default function App() {
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="font-bold text-xs text-white">Réponse de Sadio</span>
+                      <span className="font-bold text-xs text-white">Réponse de SADIO</span>
                       {isStreaming && (
                         <span className="text-[10px] font-mono text-cyan-300 animate-pulse bg-cyan-500/20 px-1.5 py-0.5 rounded border border-cyan-500/30">
                           Rédaction en direct...
@@ -1215,7 +1234,7 @@ export default function App() {
                         speak(activeAnswerText);
                       }}
                       className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 text-[11px] font-medium hover:bg-cyan-500/30 transition active:scale-95 shadow-sm"
-                      title="Écouter la voix de Sadio"
+                      title="Écouter la voix de SADIO"
                     >
                       <Volume2 className="w-3.5 h-3.5" />
                       <span>Écouter</span>
@@ -1296,7 +1315,7 @@ export default function App() {
               className="absolute bottom-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-cyan-500/50 text-cyan-300 text-xs shadow-lg backdrop-blur-md hover:bg-cyan-500/20 transition active:scale-95 animate-fade-in"
             >
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Afficher la réponse de Sadio</span>
+              <span>Afficher la réponse de SADIO</span>
             </button>
           )}
         </div>

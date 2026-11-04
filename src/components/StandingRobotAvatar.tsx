@@ -162,13 +162,13 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
   }, [state, isWaving, isGreeting, isCurrentlyThinking]);
 
   const statusTextMap: Record<RobotState, string> = {
-    idle: isGreeting ? '👋 Sadio vous salue chaleureusement !' : 'Sadio en veille active',
-    listening: 'Sadio écoute vos capteurs audio...',
+    idle: isGreeting ? '👋 SADIO vous salue chaleureusement !' : 'SADIO en veille active',
+    listening: 'SADIO écoute vos capteurs audio...',
     thinking:
       thinkingCountdown && thinkingCountdown > 0
-        ? `Sadio est en train de réfléchir (${thinkingCountdown}s)...`
-        : 'Sadio est en train de réfléchir...',
-    speaking: isGreeting ? '👋 Sadio vous souhaite la bienvenue !' : 'Sadio lit la réponse...',
+        ? `SADIO est en train de réfléchir (${thinkingCountdown}s)...`
+        : 'SADIO est en train de réfléchir...',
+    speaking: isGreeting ? '👋 SADIO vous souhaite la bienvenue !' : 'SADIO lit la réponse...',
   };
 
   return (
@@ -186,7 +186,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
               style={{ backgroundColor: colors.primary }}
             />
           </span>
-          <span className="truncate">{isCurrentlyThinking ? (thinkingCountdown && thinkingCountdown > 0 ? `Sadio réfléchit (${thinkingCountdown}s)...` : 'Sadio est en train de réfléchir...') : statusTextMap[state]}</span>
+          <span className="truncate">{isCurrentlyThinking ? (thinkingCountdown && thinkingCountdown > 0 ? `SADIO réfléchit (${thinkingCountdown}s)...` : 'SADIO est en train de réfléchir...') : statusTextMap[state]}</span>
         </div>
 
 
@@ -202,7 +202,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
             transition={{ type: 'spring', damping: 22, stiffness: 280 }}
             className="absolute z-40 left-2 right-2 sm:left-[55%] sm:right-auto top-10 sm:top-11 max-w-[calc(100%-16px)] sm:max-w-[280px] md:max-w-[320px] max-h-[75vh] overflow-y-auto no-scrollbar p-2.5 sm:p-3.5 rounded-2xl bg-slate-900/95 border-2 border-cyan-400 shadow-[0_0_30px_rgba(6,182,212,0.55)] backdrop-blur-xl pointer-events-auto"
           >
-            {/* Thought pointer towards Sadio on desktop/tablets */}
+            {/* Thought pointer towards SADIO on desktop/tablets */}
             <div className="hidden sm:block absolute -left-2 top-5 w-3.5 h-3.5 bg-slate-900 border-l-2 border-b-2 border-cyan-400 rotate-45" />
 
             {/* Cyber thought connector dots from robot on desktop */}
@@ -220,7 +220,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                   </div>
                   <div className="flex flex-col">
                     <span className="font-bold text-xs sm:text-sm text-cyan-100 tracking-wide font-sans leading-tight">
-                      Sadio est en train de réfléchir...
+                      SADIO est en train de réfléchir...
                     </span>
                   </div>
                 </div>
@@ -252,7 +252,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                       Bonjour et bienvenue !
                     </span>
                     <span className="text-[10px] text-cyan-300 font-mono">
-                      Sadio vous salue chaleureusement
+                      SADIO vous salue chaleureusement
                     </span>
                   </div>
                 </div>
@@ -270,7 +270,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                     className="mt-1 w-full py-2 px-3 rounded-xl bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/30 transition-all active:scale-95 animate-pulse"
                   >
                     <Volume2 className="w-4 h-4 shrink-0 text-white" />
-                    <span>🔊 Activer la voix de Sadio</span>
+                    <span>🔊 Activer la voix de SADIO</span>
                   </button>
                 )}
                 <p className="text-[10px] text-slate-400 text-center font-mono leading-tight">
@@ -286,7 +286,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                   </div>
                   <div className="flex flex-col">
                     <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight">
-                      Sadio s’exprime à voix haute
+                      SADIO s’exprime à voix haute
                     </span>
                     <span className="text-[10px] text-cyan-300 font-mono">
                       Réponse vocale en cours...
@@ -333,7 +333,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
       <div
         onClick={handleRobotClick}
         className="relative flex-1 w-full max-w-[300px] xs:max-w-[340px] sm:max-w-[380px] md:max-w-[440px] lg:max-w-[480px] flex items-center justify-center cursor-pointer group mt-0.5"
-        title="Cliquez pour interagir avec le robot Sadio"
+        title="Cliquez pour interagir avec le robot SADIO"
       >
         {/* Subtle Ambient Backlight Glow */}
         <div
@@ -823,7 +823,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
       <div className="w-full text-center z-10 pt-1 pb-2">
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/80 border border-slate-700/60 text-slate-300 text-xs shadow-inner">
           <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-          <span className="font-semibold text-slate-100">Sadio</span>
+          <span className="font-semibold text-slate-100">SADIO</span>
           <span className="text-slate-500">•</span>
           <span className="text-slate-400">Avatar Robot Intelligent</span>
         </div>

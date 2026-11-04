@@ -22,10 +22,12 @@ export const PWAInstallButton: React.FC = () => {
     return (
       <button
         onClick={install}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium text-xs shadow-md shadow-cyan-500/20 transition-all active:scale-95"
+        className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium text-xs shadow-md shadow-cyan-500/20 transition-all active:scale-95 shrink-0"
+        title="Installer l'application sur votre écran d'accueil"
       >
-        <Download className="w-3.5 h-3.5" />
-        <span>Installer l’App</span>
+        <Download className="w-3.5 h-3.5 shrink-0" />
+        <span className="hidden md:inline">Installer l'App</span>
+        <span className="hidden sm:inline md:hidden">Installer</span>
       </button>
     );
   }
@@ -36,10 +38,12 @@ export const PWAInstallButton: React.FC = () => {
       <>
         <button
           onClick={() => setShowIOSGuide(true)}
-          className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-all active:scale-95"
+          className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-800/80 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-all active:scale-95 shrink-0"
+          title="Installer sur iPhone / iPad"
         >
-          <Download className="w-3.5 h-3.5 text-cyan-400" />
-          <span>Installer sur iOS</span>
+          <Download className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+          <span className="hidden md:inline">Installer sur iOS</span>
+          <span className="hidden sm:inline md:hidden">Installer</span>
         </button>
 
         {showIOSGuide && (
@@ -57,7 +61,7 @@ export const PWAInstallButton: React.FC = () => {
                   <Download className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-semibold text-white">Installer RoboOmni</h3>
+                  <h3 className="text-base font-semibold text-white">Installer SADIO AI</h3>
                   <p className="text-xs text-slate-400">Accès hors-ligne & plein écran sur iOS</p>
                 </div>
               </div>
@@ -95,12 +99,12 @@ export const PWAInstallButton: React.FC = () => {
     <>
       <button
         onClick={() => setShowGenericGuide(true)}
-        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-700/80 bg-slate-850 hover:bg-slate-800 text-slate-300 font-mono text-xs transition active:scale-95"
+        className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1.5 rounded-xl border border-slate-700/80 bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono text-xs transition active:scale-95 shrink-0"
         title="Installer l'application sur votre appareil"
       >
-        <Download className="w-3.5 h-3.5 text-cyan-400" />
-        <span className="hidden sm:inline">Installer l'App</span>
-        <span className="sm:hidden">App</span>
+        <Download className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+        <span className="hidden md:inline">Installer l'App</span>
+        <span className="hidden sm:inline md:hidden">App</span>
       </button>
 
       {showGenericGuide && (

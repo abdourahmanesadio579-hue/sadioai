@@ -44,7 +44,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
             <div className="space-y-1">
               <h2 className="text-xl font-bold text-white tracking-wide">
-                Initialisation de Sadio AI
+                Initialisation de SADIO AI
               </h2>
               <p className="text-xs text-slate-400">
                 Une interruption est survenue lors du chargement des composants graphiques ou audio.
@@ -66,7 +66,7 @@ export class ErrorBoundary extends Component<Props, State> {
               className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-medium text-sm flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/25 transition active:scale-95 cursor-pointer"
             >
               <RefreshCw className="w-4 h-4" />
-              <span>Redémarrer Sadio AI</span>
+              <span>Redémarrer SADIO AI</span>
             </button>
           </div>
         </div>

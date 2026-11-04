@@ -32,7 +32,59 @@
     <!-- Google Fonts for futuristic & clean typography -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <!-- Pre-warm SpeechSynthesis, AudioContext and cache GREETING_SPOKEN_TEXT at earliest HTML parse -->
+    <script>
+      (function() {
+        try {
+          window.__SADIO_GREETING_TEXT = "Bonjour ! Je suis SADIO, votre avatar robot intelligent. Comment puis-je vous aider aujourd'hui ?";
+          if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+            var synth = window.speechSynthesis;
+            if (synth.paused) synth.resume();
+
+            var pickBestFrench = function(voices) {
+              if (!voices || voices.length === 0) return null;
+              var genuine = voices.filter(function(v) {
+                var l = (v.lang || '').toLowerCase().replace('_', '-');
+                return l.startsWith('fr') || l.includes('fra') || l.includes('french');
+              });
+              if (genuine.length === 0) return null;
+              var neural = genuine.find(function(v) {
+                var n = (v.name || '').toLowerCase();
+                return n.includes('google') || n.includes('enhanced') || n.includes('natural') || n.includes('siri') || n.includes('premium');
+              });
+              return neural || genuine[0];
+            };
+
+            var primeGreetingCache = function() {
+              try {
+                var voices = synth.getVoices();
+                if (voices && voices.length > 0) {
+                  window.__sadio_available_voices = voices;
+                  var best = pickBestFrench(voices);
+                  if (best) {
+                    window.__sadio_best_french_voice = best;
+                  }
+                }
+                var u = new SpeechSynthesisUtterance(window.__SADIO_GREETING_TEXT);
+                u.lang = (window.__sadio_best_french_voice && window.__sadio_best_french_voice.lang) || 'fr-FR';
+                u.rate = 1.0;
+                u.pitch = 1.0;
+                u.volume = 1.0;
+                if (window.__sadio_best_french_voice) {
+                  u.voice = window.__sadio_best_french_voice;
+                }
+                window.__sadio_cached_greeting_utterance = u;
+              } catch(err) {}
+            };
+
+            primeGreetingCache();
+            if ('onvoiceschanged' in synth) {
+              synth.onvoiceschanged = primeGreetingCache;
+            }
+          }
+        } catch(e) {}
+      })();
+    </script>
   </head>
   <body class="bg-[#070b14] text-slate-100 font-sans antialiased selection:bg-cyan-500/30 selection:text-cyan-200 overflow-hidden">
     <div id="root">

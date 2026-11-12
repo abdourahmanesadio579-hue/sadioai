@@ -27,5 +27,8 @@
     }
   },
   "transactions": {},
-  "processedWebhooks": {}
+  "processedWebhooks": {},
+  "ocrDailyUsage": {},
+  "callDailyUsage": {},
+  "registrationsDailyUsage": {}
 }

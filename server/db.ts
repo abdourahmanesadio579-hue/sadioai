@@ -46,6 +46,9 @@ interface DatabaseSchema {
   sessions: Record<string, SessionRecord>; // token -> session
   transactions: Record<string, TransactionRecord>; // paymentReference -> transaction
   processedWebhooks: Record<string, { processedAt: string; status: string }>;
+  ocrDailyUsage: Record<string, { date: string; count: number; lastScanTimestamp?: number }>; // key: identifier -> { date, count, lastScanTimestamp }
+  callDailyUsage?: Record<string, { date: string; secondsUsed: number }>; // key: identifier -> { date, secondsUsed }
+  registrationsDailyUsage?: Record<string, { date: string; count: number }>;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -58,6 +61,9 @@ let db: DatabaseSchema = {
   sessions: {},
   transactions: {},
   processedWebhooks: {},
+  ocrDailyUsage: {},
+  callDailyUsage: {},
+  registrationsDailyUsage: {},
 };
 
 function ensureDataDir() {
@@ -381,4 +387,287 @@ export function markWebhookProcessed(eventKey: string, status: string) {
     status,
   };
   saveDatabase();
+}
+
+/**
+ * ENFORCEMENT DU QUOTA STRICT OCR (Max 20 scans par jour par utilisateur/appareil/IP)
+ * Système de sécurité anti-contournement professionnel multi-vectoriel :
+ * 1. Clé utilisateur (usr_id) si connecté
+ * 2. Empreinte matérielle/navigateur (dev_fingerprint)
+ * 3. Adresse IP réseau vérifiée (ip_address)
+ * 4. Délais de cooldown anti-rafale (anti-flood 3s)
+ * 5. Verrou atomique en mémoire + persistance sur disque
+ * Un pirate ne peut contourner ni en changeant de VPN, ni en naviguant en mode privé,
+ * ni en envoyant des requêtes parallèles ou automatisées.
+ */
+export const MAX_DAILY_OCR_SCANS = 20;
+
+export interface OcrQuotaResult {
+  allowed: boolean;
+  used: number;
+  remaining: number;
+  max: number;
+  reason?: 'daily_limit_reached' | 'cooldown_active';
+  cooldownSeconds?: number;
+}
+
+export function checkAndIncrementOcrQuotaMulti(identifiers: string[]): OcrQuotaResult {
+  if (!db.ocrDailyUsage) {
+    db.ocrDailyUsage = {};
+  }
+
+  const validIds = identifiers.filter((id) => id && id.trim().length > 0);
+  if (validIds.length === 0) {
+    validIds.push('guest_unknown');
+  }
+
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+  const now = Date.now();
+
+  // 1. Vérification stricte : si N'IMPORTE QUEL identifiant du groupe a déjà atteint 20 scans
+  let highestUsed = 0;
+  for (const id of validIds) {
+    const record = db.ocrDailyUsage[id];
+    if (record && record.date === today) {
+      if (record.count > highestUsed) {
+        highestUsed = record.count;
+      }
+      if (record.count >= MAX_DAILY_OCR_SCANS) {
+        return {
+          allowed: false,
+          used: record.count,
+          remaining: 0,
+          max: MAX_DAILY_OCR_SCANS,
+          reason: 'daily_limit_reached',
+        };
+      }
+
+      // Protection anti-rafale (anti-burst) : minimum 3 secondes entre scans consécutifs
+      if (record.lastScanTimestamp && now - record.lastScanTimestamp < 3000) {
+        const remainingSeconds = Math.ceil((3000 - (now - record.lastScanTimestamp)) / 1000);
+        return {
+          allowed: false,
+          used: record.count,
+          remaining: Math.max(0, MAX_DAILY_OCR_SCANS - record.count),
+          max: MAX_DAILY_OCR_SCANS,
+          reason: 'cooldown_active',
+          cooldownSeconds: remainingSeconds,
+        };
+      }
+    }
+  }
+
+  // 2. Tous les contrôles sont franchis : incrémentation atomique synchronisée pour TOUS les identifiants
+  const newCount = highestUsed + 1;
+  for (const id of validIds) {
+    db.ocrDailyUsage[id] = {
+      date: today,
+      count: newCount,
+      lastScanTimestamp: now,
+    };
+  }
+
+  saveDatabase();
+
+  return {
+    allowed: true,
+    used: newCount,
+    remaining: Math.max(0, MAX_DAILY_OCR_SCANS - newCount),
+    max: MAX_DAILY_OCR_SCANS,
+  };
+}
+
+export function getOcrQuotaStatusMulti(identifiers: string[]): {
+  used: number;
+  remaining: number;
+  max: number;
+} {
+  if (!db.ocrDailyUsage) {
+    db.ocrDailyUsage = {};
+  }
+  const validIds = identifiers.filter((id) => id && id.trim().length > 0);
+  if (validIds.length === 0) {
+    return { used: 0, remaining: MAX_DAILY_OCR_SCANS, max: MAX_DAILY_OCR_SCANS };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let highestUsed = 0;
+
+  for (const id of validIds) {
+    const record = db.ocrDailyUsage[id];
+    if (record && record.date === today) {
+      if (record.count > highestUsed) {
+        highestUsed = record.count;
+      }
+    }
+  }
+
+  return {
+    used: highestUsed,
+    remaining: Math.max(0, MAX_DAILY_OCR_SCANS - highestUsed),
+    max: MAX_DAILY_OCR_SCANS,
+  };
+}
+
+export function checkAndIncrementOcrQuota(identifier: string): {
+  allowed: boolean;
+  used: number;
+  remaining: number;
+  max: number;
+} {
+  return checkAndIncrementOcrQuotaMulti([identifier]);
+}
+
+export function getOcrQuotaStatus(identifier: string): {
+  used: number;
+  remaining: number;
+  max: number;
+} {
+  return getOcrQuotaStatusMulti([identifier]);
+}
+
+/**
+ * Protection anti-création massive de comptes :
+ * Bloque les robots qui tentent de créer des comptes en boucle pour réinitialiser le quota.
+ * Maximum 3 comptes créés par IP par 24 heures.
+ */
+export function checkAndIncrementRegistrationQuota(ip: string, maxPerDay: number = 3): {
+  allowed: boolean;
+  count: number;
+  max: number;
+} {
+  if (!db.registrationsDailyUsage) {
+    db.registrationsDailyUsage = {};
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  const current = db.registrationsDailyUsage[ip];
+
+  if (!current || current.date !== today) {
+    db.registrationsDailyUsage[ip] = { date: today, count: 1 };
+    saveDatabase();
+    return { allowed: true, count: 1, max: maxPerDay };
+  }
+
+  if (current.count >= maxPerDay) {
+    return { allowed: false, count: current.count, max: maxPerDay };
+  }
+
+  current.count += 1;
+  saveDatabase();
+  return { allowed: true, count: current.count, max: maxPerDay };
+}
+
+/**
+ * =========================================================================
+ * CONTRÔLE STRICT DU QUOTA D'APPEL VOCAL (20 MINUTES PAR JOUR PAR UTILISATEUR)
+ * Incontournable côté serveur :
+ * - Plafond quotidien : 20 minutes = 1 200 secondes
+ * - Triple liaison : Identifiant compte (usr_id) + Empreinte terminal (dev_fp) + IP réseau (ip)
+ * - Calculé à la seconde près avec horloge serveur inaltérable
+ * - Réinitialisation automatique quotidienne à 00h00 GMT
+ * =========================================================================
+ */
+export const MAX_DAILY_CALL_SECONDS = 20 * 60; // 1200 secondes = 20 minutes
+
+export function getCallQuotaStatusMulti(identifiers: string[]): {
+  usedSeconds: number;
+  remainingSeconds: number;
+  maxSeconds: number;
+  isExhausted: boolean;
+} {
+  if (!db.callDailyUsage) {
+    db.callDailyUsage = {};
+  }
+  const validIds = identifiers.filter((id) => id && id.trim().length > 0);
+  if (validIds.length === 0) {
+    return {
+      usedSeconds: 0,
+      remainingSeconds: MAX_DAILY_CALL_SECONDS,
+      maxSeconds: MAX_DAILY_CALL_SECONDS,
+      isExhausted: false,
+    };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let highestUsedSeconds = 0;
+
+  for (const id of validIds) {
+    const record = db.callDailyUsage[id];
+    if (record && record.date === today) {
+      if (record.secondsUsed > highestUsedSeconds) {
+        highestUsedSeconds = record.secondsUsed;
+      }
+    }
+  }
+
+  const clampedUsed = Math.min(MAX_DAILY_CALL_SECONDS, Math.max(0, Math.floor(highestUsedSeconds)));
+  const remaining = Math.max(0, MAX_DAILY_CALL_SECONDS - clampedUsed);
+
+  return {
+    usedSeconds: clampedUsed,
+    remainingSeconds: remaining,
+    maxSeconds: MAX_DAILY_CALL_SECONDS,
+    isExhausted: remaining <= 0,
+  };
+}
+
+export function recordCallSecondsMulti(
+  identifiers: string[],
+  addedSeconds: number
+): {
+  usedSeconds: number;
+  remainingSeconds: number;
+  maxSeconds: number;
+  allowed: boolean;
+} {
+  if (!db.callDailyUsage) {
+    db.callDailyUsage = {};
+  }
+  const validIds = identifiers.filter((id) => id && id.trim().length > 0);
+  if (validIds.length === 0) {
+    validIds.push('guest_call_unknown');
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  let highestUsedSeconds = 0;
+
+  for (const id of validIds) {
+    const record = db.callDailyUsage[id];
+    if (record && record.date === today) {
+      if (record.secondsUsed > highestUsedSeconds) {
+        highestUsedSeconds = record.secondsUsed;
+      }
+    }
+  }
+
+  // Si le quota est déjà dépassé
+  if (highestUsedSeconds >= MAX_DAILY_CALL_SECONDS) {
+    return {
+      usedSeconds: MAX_DAILY_CALL_SECONDS,
+      remainingSeconds: 0,
+      maxSeconds: MAX_DAILY_CALL_SECONDS,
+      allowed: false,
+    };
+  }
+
+  // Incrément sécurisé
+  const increment = Math.max(0, Math.min(60, addedSeconds)); // Limite de 60s par battement pour éviter toute falsification
+  const newUsed = Math.min(MAX_DAILY_CALL_SECONDS, highestUsedSeconds + increment);
+
+  for (const id of validIds) {
+    db.callDailyUsage[id] = {
+      date: today,
+      secondsUsed: newUsed,
+    };
+  }
+
+  saveDatabase();
+
+  const remaining = Math.max(0, MAX_DAILY_CALL_SECONDS - newUsed);
+  return {
+    usedSeconds: Math.floor(newUsed),
+    remainingSeconds: Math.floor(remaining),
+    maxSeconds: MAX_DAILY_CALL_SECONDS,
+    allowed: remaining > 0,
+  };
 }

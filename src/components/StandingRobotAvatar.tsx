@@ -81,7 +81,14 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
     return () => clearInterval(blinkInterval);
   }, []);
 
-  const handleRobotClick = () => {
+  const isBusy = isCurrentlyThinking || (state === 'speaking' && isVoicing) || Boolean(isThinking);
+
+  const handleRobotClick = (e?: React.MouseEvent) => {
+    // Si le robot commence à réfléchir ou est en train de formuler une réponse, ignorer pour ne pas couper sa réflexion
+    if (isBusy) {
+      e?.stopPropagation();
+      return;
+    }
     setIsWaving(true);
     setClickCount((c) => c + 1);
     setTimeout(() => setIsWaving(false), 2400);
@@ -192,9 +199,9 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
 
       </div>
 
-      {/* HOLOGRAPHIC THOUGHT, SPEECH & WARM WELCOME BALLOON DIRECTLY BESIDE THE ROBOT */}
+      {/* HOLOGRAPHIC WARM WELCOME BALLOON - UNIQUEMENT LORS D'UNE SALUTATION DU ROBOT */}
       <AnimatePresence>
-        {(isCurrentlyThinking || state === 'speaking' || (isGreeting && !isCurrentlyThinking)) && (
+        {isGreeting && (
           <motion.div
             initial={{ opacity: 0, y: -10, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -211,120 +218,42 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
               <span className="w-2 h-2 rounded-full bg-cyan-400/90 shadow-[0_0_6px_#22d3ee]" />
             </div>
 
-            {isCurrentlyThinking ? (
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-2">
-                  <div className="relative flex items-center justify-center shrink-0 w-7 h-7 rounded-xl bg-cyan-500/20 border border-cyan-400/60 shadow-[0_0_10px_rgba(6,182,212,0.4)]">
-                    <Cpu className="w-4 h-4 text-cyan-300 animate-spin" />
-                    <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-bold text-xs sm:text-sm text-cyan-100 tracking-wide font-sans leading-tight">
-                      SADIO est en train de réfléchir...
-                    </span>
-                  </div>
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/60 shadow-[0_0_12px_rgba(6,182,212,0.4)]">
+                  <span className="text-base select-none">👋</span>
+                  <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
                 </div>
-
-                <div className="flex items-center justify-between text-[11px] text-slate-300 font-mono mt-1 pt-1.5 border-t border-cyan-500/30">
-                  <span className="text-cyan-400/90 flex items-center gap-1 text-[10px]">
-                    <Sparkles className="w-3 h-3 text-cyan-400 animate-pulse" />
-                    Calcul neuronal
+                <div className="flex flex-col">
+                  <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight">
+                    Bonjour et bienvenue !
                   </span>
-                  <span className="font-bold text-cyan-300 bg-cyan-500/25 px-2 py-0.5 rounded-full border border-cyan-400/40 text-[10px]">
-                    {thinkingCountdown && thinkingCountdown > 0 ? `${thinkingCountdown}s` : 'Instantané'}
+                  <span className="text-[10px] text-cyan-300 font-mono">
+                    SADIO vous salue chaleureusement
                   </span>
                 </div>
-
-                {/* Instant responsive real-time neural activity bar */}
-                <div className="w-full bg-slate-800/90 rounded-full h-1.5 mt-1 overflow-hidden border border-slate-700/60 relative">
-                  <div className="bg-gradient-to-r from-cyan-400 via-sky-400 to-blue-500 h-full w-full rounded-full shadow-[0_0_10px_rgba(6,182,212,0.9)] animate-pulse" />
-                </div>
               </div>
-            ) : isGreeting && state !== 'speaking' ? (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/60 shadow-[0_0_12px_rgba(6,182,212,0.4)]">
-                    <span className="text-base select-none">👋</span>
-                    <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight">
-                      Bonjour et bienvenue !
-                    </span>
-                    <span className="text-[10px] text-cyan-300 font-mono">
-                      SADIO vous salue chaleureusement
-                    </span>
-                  </div>
-                </div>
 
-                <p className="text-[11px] sm:text-xs text-slate-200 leading-snug font-sans">
-                  {greetingText || "« Ravi de vous accueillir ! Je suis debout et prêt à répondre à toutes vos questions. »"}
-                </p>
+              <p className="text-[11px] sm:text-xs text-slate-200 leading-snug font-sans">
+                {greetingText || "« Ravi de vous accueillir ! Je suis debout et prêt à répondre à toutes vos questions. »"}
+              </p>
 
-                {onReplayGreeting && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onReplayGreeting();
-                    }}
-                    className="mt-1 w-full py-2 px-3 rounded-xl bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/30 transition-all active:scale-95 animate-pulse"
-                  >
-                    <Volume2 className="w-4 h-4 shrink-0 text-white" />
-                    <span>🔊 Activer la voix de SADIO</span>
-                  </button>
-                )}
-                <p className="text-[10px] text-slate-400 text-center font-mono leading-tight">
-                  Conseil mobile : montez le volume média & désactivez le mode silencieux
-                </p>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/50 shadow-[0_0_10px_rgba(6,182,212,0.4)]">
-                    <Volume2 className="w-4 h-4 text-cyan-300 animate-pulse" />
-                    <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight">
-                      SADIO s’exprime à voix haute
-                    </span>
-                    <span className="text-[10px] text-cyan-300 font-mono">
-                      Réponse vocale en cours...
-                    </span>
-                  </div>
-                </div>
-
-                {/* Vocal frequency equalizer synchronized to speech voicing */}
-                <div className="flex items-center justify-center gap-1 py-1.5 px-3 bg-slate-950/80 rounded-xl border border-cyan-500/30">
-                  {[...Array(11)].map((_, i) => {
-                    const normMouth = mouthOpenLevel || 0;
-                    const barHeight = isVoicing
-                      ? Math.round(4 + normMouth * 16 * (0.65 + ((i * 3) % 4) * 0.12))
-                      : 3;
-                    return (
-                      <span
-                        key={i}
-                        className="w-1 bg-cyan-400 rounded-full transition-all duration-75 shadow-[0_0_6px_#22d3ee]"
-                        style={{
-                          height: `${barHeight}px`,
-                          opacity: isVoicing ? 1 : 0.35,
-                        }}
-                      />
-                    );
-                  })}
-                </div>
-
-                {currentSpeechSnippet ? (
-                  <p className="text-xs text-slate-100 font-sans leading-relaxed bg-slate-950/70 p-2.5 rounded-xl border border-cyan-500/30 max-h-[140px] overflow-y-auto no-scrollbar">
-                    « {currentSpeechSnippet} »
-                  </p>
-                ) : (
-                  <div className="text-[10px] text-slate-300 text-center font-mono">
-                    Écoutez la réponse vocale du robot
-                  </div>
-                )}
-              </div>
-            )}
+              {onReplayGreeting && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onReplayGreeting();
+                  }}
+                  className="mt-1 w-full py-2 px-3 rounded-xl bg-gradient-to-r from-cyan-500 via-sky-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/30 transition-all active:scale-95 animate-pulse"
+                >
+                  <Volume2 className="w-4 h-4 shrink-0 text-white" />
+                  <span>🔊 Activer la voix de SADIO</span>
+                </button>
+              )}
+              <p className="text-[10px] text-slate-400 text-center font-mono leading-tight">
+                Conseil mobile : montez le volume média & désactivez le mode silencieux
+              </p>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -332,8 +261,16 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
       {/* Center Standing Robot Canvas & SVG */}
       <div
         onClick={handleRobotClick}
-        className="relative flex-1 w-full max-w-[300px] xs:max-w-[340px] sm:max-w-[380px] md:max-w-[440px] lg:max-w-[480px] flex items-center justify-center cursor-pointer group mt-0.5"
-        title="Cliquez pour interagir avec le robot SADIO"
+        className={`relative flex-1 w-full max-w-[300px] xs:max-w-[340px] sm:max-w-[380px] md:max-w-[440px] lg:max-w-[480px] flex items-center justify-center group mt-0.5 ${
+          isBusy ? 'cursor-default' : 'cursor-pointer'
+        }`}
+        title={
+          isBusy
+            ? isCurrentlyThinking
+              ? 'SADIO est en pleine réflexion...'
+              : 'SADIO est en train de vous répondre...'
+            : 'Cliquez pour interagir avec le robot SADIO'
+        }
       >
         {/* Subtle Ambient Backlight Glow */}
         <div

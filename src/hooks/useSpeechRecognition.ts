@@ -6,7 +6,13 @@ interface IWindow extends Window {
   SpeechRecognition?: any;
 }
 
-export function useSpeechRecognition({ onResult }: { onResult: (transcript: string) => void }) {
+export function useSpeechRecognition({
+  onResult,
+  lang = 'fr-FR',
+}: {
+  onResult: (transcript: string) => void;
+  lang?: string;
+}) {
   const [isListening, setIsListening] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
   const recognitionRef = useRef<any>(null);
@@ -21,7 +27,7 @@ export function useSpeechRecognition({ onResult }: { onResult: (transcript: stri
         const recognition = new SpeechRecognitionClass();
         recognition.continuous = false;
         recognition.interimResults = false;
-        recognition.lang = 'fr-FR';
+        recognition.lang = lang;
 
         recognition.onresult = (event: any) => {
           const transcript = event.results?.[0]?.[0]?.transcript;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { StandingRobotAvatar } from './components/StandingRobotAvatar';
 import { SettingsModal } from './components/SettingsModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -24,32 +24,54 @@ import {
   Copy,
   Check,
   X,
-  Plus,
   Image as ImageIcon,
+  FileText,
+  Radio,
+  Phone,
+  Download,
+  ScanText,
+  LineChart,
+  Calculator,
 } from 'lucide-react';
 import { processImageFile, formatFileSize, ProcessedImage } from './utils/imageCompressor';
 import { ChatMessageItem } from './components/ChatMessageItem';
-
-const GREETING_SPOKEN_TEXT =
-  "Bonjour ! Je suis SADIO, votre avatar robot intelligent. Comment puis-je vous aider aujourd'hui ?";
-
-const INITIAL_BOT_MESSAGE: ChatMessage = {
-  id: 'init-msg-1',
-  role: 'model',
-  content: `👋 **Bonjour et bienvenue ! C'est un réel et sincère plaisir de vous accueillir.**
-
-Je suis **SADIO**, votre avatar robot intelligent. Je me tiens debout au centre de votre écran, entièrement dédié à vous accompagner et à répondre à toutes vos interrogations avec précision, rigueur et exhaustivité.
-
-Posez votre question ci-dessous ou cliquez sur le micro pour me parler directement !`,
-  timestamp: Date.now(),
-  domain: 'Tous Domaines',
-};
+import { KaraokeReaderModal } from './components/KaraokeReaderModal';
+import { HandsFreeCallModal } from './components/HandsFreeCallModal';
+import { OcrScannerModal } from './components/OcrScannerModal';
+import { MathSolverModal } from './components/MathSolverModal';
+import { exportTextAsAudioPodcast } from './utils/audioPodcastExporter';
+import {
+  getStoredCallQuota,
+  saveStoredCallQuota,
+  fetchServerCallQuota,
+  MAX_DAILY_CALL_SECONDS,
+  formatCallTime,
+} from './utils/callQuota';
+import {
+  Language,
+  getStoredLanguage,
+  saveStoredLanguage,
+  TRANSLATIONS,
+} from './utils/i18n';
 
 const THEME_KEY = 'robo_omni_theme_v2';
 const HIDE_TEXT_KEY = 'robo_omni_hide_response_text_v1';
 
 export default function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_BOT_MESSAGE]);
+  const [language, setLanguage] = useState<Language>(() => getStoredLanguage());
+
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    const initialLang = getStoredLanguage();
+    return [
+      {
+        id: 'init-msg-1',
+        role: 'model',
+        content: TRANSLATIONS[initialLang].greeting.content,
+        timestamp: Date.now(),
+        domain: 'Tous Domaines',
+      },
+    ];
+  });
   const [input, setInput] = useState('');
   const [robotState, setRobotState] = useState<RobotState>('idle');
   const [currentDomain, setCurrentDomain] = useState<DomainCategory>(DOMAINS[0]);
@@ -62,7 +84,7 @@ export default function App() {
   const [streamingContent, setStreamingContent] = useState('');
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
 
-  // Pure Voice Mode: Hide response text on screen (defaults to true so answers are spoken by voice without text clutter on screen)
+  // Response text display state (always true/visible by default so text displays when robot reads)
   const [hideResponseText, setHideResponseText] = useState<boolean>(() => {
     try {
       const saved = safeStorage.getItem(HIDE_TEXT_KEY);
@@ -70,7 +92,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    return true;
+    return false;
   });
 
   const [chatErrorMessage, setChatErrorMessage] = useState<string | null>(null);
@@ -85,7 +107,6 @@ export default function App() {
   // Gemini Vision Image analysis state
   const [selectedImage, setSelectedImage] = useState<ProcessedImage | null>(null);
   const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toggleHideResponseText = () => {
     setHideResponseText((prev) => {
@@ -109,6 +130,36 @@ export default function App() {
   const [isGreeting, setIsGreeting] = useState(true);
   const greetingTriggeredRef = useRef(false);
   const greetingAudioPlayedRef = useRef(false);
+  const isBusyThinkingOrRespondingRef = useRef(false);
+
+  // Proposition 2: Bandeau de Sous-titres Cybernétiques (Style Cinéma / HUD)
+  const [showFullTextModal, setShowFullTextModal] = useState<boolean>(false);
+  const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
+
+  // Résolveur Étape par Étape & Traceur Graphique (100% 0 F)
+  const [isMathModalOpen, setIsMathModalOpen] = useState<boolean>(false);
+  const [mathEquationToSolve, setMathEquationToSolve] = useState<string>('2x² - 4x - 6 = 0');
+
+  // Mode Appel Mains Libres (Quota quotidien cumulatif strict côté serveur : 20 min = 1200s)
+  const [isCallModalOpen, setIsCallModalOpen] = useState<boolean>(false);
+  const [usedCallSeconds, setUsedCallSeconds] = useState<number>(() => {
+    return getStoredCallQuota().usedSeconds;
+  });
+
+  // Synchronisation stricte du quota d'appel avec le serveur au montage et à l'ouverture de l'appel
+  useEffect(() => {
+    fetchServerCallQuota().then((quota) => {
+      setUsedCallSeconds(quota.usedSeconds);
+    });
+  }, [isCallModalOpen]);
+
+  const remainingCallSeconds = Math.max(0, MAX_DAILY_CALL_SECONDS - usedCallSeconds);
+  const isCallQuotaExhausted = remainingCallSeconds <= 0;
+
+  const handleTickUsedCallSeconds = useCallback((newTotal: number) => {
+    setUsedCallSeconds(newTotal);
+    saveStoredCallQuota(newTotal);
+  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -239,28 +290,91 @@ export default function App() {
     selectedVoice,
     setSelectedVoice,
     currentSentence,
+    currentSentenceIndex,
+    currentCharIndex,
+    currentSpokenWord,
+    currentWordIndex,
     speechError,
     startStreamingSpeech,
     enqueueStreamingSentence,
     finishStreamingSpeech,
     speak,
+    speakFromSentenceIndex,
     speakGreeting,
     pause: pauseSpeech,
     resume: resumeSpeech,
     stop: stopSpeech,
     testVoice,
+    testSpecificVoice,
     unlockAudioContext,
-  } = useSpeechSynthesis();
+  } = useSpeechSynthesis(language);
 
   // Speech recognition for mic
   const { isListening, isSupported: isSpeechSupported, toggleListening } = useSpeechRecognition({
     onResult: (transcript) => {
       setInput((prev) => (prev ? `${prev} ${transcript}` : transcript));
     },
+    lang: TRANSLATIONS[language].speechRecognitionLang,
   });
+
+  const handleLanguageChange = useCallback((newLang: Language) => {
+    setLanguage(newLang);
+    saveStoredLanguage(newLang);
+    // If user is on initial welcome screen, automatically switch the welcome message language
+    setMessages((prev) => {
+      if (prev.length === 1 && prev[0].id === 'init-msg-1') {
+        return [
+          {
+            ...prev[0],
+            content: TRANSLATIONS[newLang].greeting.content,
+          },
+        ];
+      }
+      return prev;
+    });
+  }, []);
+
+  const handleToggleVoice = useCallback(() => {
+    unlockAudioContext();
+    const next = !voiceEnabled;
+    setVoiceEnabled(next);
+    if (!next) {
+      stopSpeech();
+    } else {
+      speak(
+        language === 'en'
+          ? "Voice enabled! I am SADIO, fully at your service."
+          : "Voix activée ! Je suis SADIO, entièrement à votre écoute."
+      );
+    }
+  }, [voiceEnabled, unlockAudioContext, setVoiceEnabled, stopSpeech, speak, language]);
+
+  const handleLaunchCallModal = useCallback(() => {
+    unlockAudioContext();
+    const freshQuota = getStoredCallQuota();
+    setUsedCallSeconds(freshQuota.usedSeconds);
+    if (freshQuota.usedSeconds >= MAX_DAILY_CALL_SECONDS) {
+      setChatErrorMessage(
+        "⏳ Quota quotidien de 20 minutes d'appel vocal atteint pour aujourd'hui. Votre quota sera réinitialisé demain à minuit !"
+      );
+      return;
+    }
+    setIsCallModalOpen(true);
+  }, [unlockAudioContext]);
+
+  const handleCloseCallModal = useCallback(() => {
+    setIsCallModalOpen(false);
+    const freshQuota = getStoredCallQuota();
+    setUsedCallSeconds(freshQuota.usedSeconds);
+  }, []);
 
   const triggerWarmGreeting = useCallback(
     (forcePlayAudio = true) => {
+      // Si le robot est en train de réfléchir ou de répondre, ne jamais déclencher la salutation ni couper la réponse !
+      if (isBusyThinkingOrRespondingRef.current) {
+        return;
+      }
+
       setIsGreeting(true);
       greetingTriggeredRef.current = true;
 
@@ -268,73 +382,63 @@ export default function App() {
         setTimeout(() => {
           setIsGreeting(false);
           setRobotState('idle');
-        }, 2000);
+        }, 5000);
         return;
       }
 
       unlockAudioContext();
       setRobotState('speaking');
 
-      let finished = false;
-      const onGreetingDone = () => {
-        if (finished) return;
-        finished = true;
-        greetingAudioPlayedRef.current = true;
-        setRobotState('idle');
-        setTimeout(() => {
-          setIsGreeting(false);
-        }, 1200);
-      };
-
-      const safetyTimer = setTimeout(onGreetingDone, 5500);
-
       try {
-        speakGreeting(GREETING_SPOKEN_TEXT, () => {
-          clearTimeout(safetyTimer);
-          onGreetingDone();
+        speakGreeting(TRANSLATIONS[language].greeting.spoken, () => {
+          greetingAudioPlayedRef.current = true;
+          setRobotState('idle');
+          setIsGreeting(false);
         });
       } catch {
-        clearTimeout(safetyTimer);
-        onGreetingDone();
+        setRobotState('idle');
+        setIsGreeting(false);
       }
     },
-    [voiceEnabled, speakGreeting, unlockAudioContext]
+    [voiceEnabled, speakGreeting, unlockAudioContext, language]
   );
 
-  // Automatic warm greeting upon entering the app + INSTANT trigger on first touch/click
+  // Automatic warm greeting upon entering the app + INSTANT trigger on first touch/click in emulators & browsers
   useEffect(() => {
-    // 1. Try immediate playback at 60ms for desktop and environments allowing autoplay
+    // 1. Try immediate playback at 80ms for desktop and environments allowing autoplay
     const autoGreetTimer = window.setTimeout(() => {
       triggerWarmGreeting(true);
-    }, 60);
+    }, 80);
 
-    // 2. On mobile (iOS / Android), if autoplay was silenced by the OS, the VERY FIRST touch anywhere
-    // immediately unlocks the audio context and launches the greeting without any lag!
+    // 2. In emulators or mobile where autoplay is silenced by browser security,
+    // any user touch/click triggers the greeting speech cleanly
     const handleImmediateGesture = () => {
       unlockAudioContext();
+      if (isBusyThinkingOrRespondingRef.current) {
+        return;
+      }
       if (!greetingAudioPlayedRef.current) {
         triggerWarmGreeting(true);
       }
     };
 
-    window.addEventListener('pointerdown', handleImmediateGesture, { passive: true, once: true });
-    window.addEventListener('touchstart', handleImmediateGesture, { passive: true, once: true });
-    window.addEventListener('click', handleImmediateGesture, { passive: true, once: true });
-    window.addEventListener('keydown', handleImmediateGesture, { passive: true, once: true });
+    window.addEventListener('pointerdown', handleImmediateGesture, { passive: true });
+    window.addEventListener('touchstart', handleImmediateGesture, { passive: true });
+    window.addEventListener('click', handleImmediateGesture, { passive: true });
 
     return () => {
       clearTimeout(autoGreetTimer);
       window.removeEventListener('pointerdown', handleImmediateGesture);
       window.removeEventListener('touchstart', handleImmediateGesture);
       window.removeEventListener('click', handleImmediateGesture);
-      window.removeEventListener('keydown', handleImmediateGesture);
     };
   }, [triggerWarmGreeting, unlockAudioContext]);
 
-  // Clean up any old chat history in safeStorage so nothing persists
+  // Clean up any old chat history or old hide text flags in safeStorage so text displays cleanly
   useEffect(() => {
     safeStorage.removeItem('robo_omni_chat_history_v2');
     safeStorage.removeItem('robo_omni_chat_history');
+    safeStorage.removeItem(HIDE_TEXT_KEY);
   }, []);
 
   useEffect(() => {
@@ -429,13 +533,21 @@ export default function App() {
     }
   }, [isListening, isSpeaking, isThinking, isStreaming, isGreeting]);
 
-  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
 
-    // Reset so user can re-select same file if needed
-    e.target.value = '';
 
+  // Synchronize busy state so any touch or click on the screen can immediately check if the robot is busy
+  const isBusyThinkingOrResponding =
+    isThinking ||
+    isStreaming ||
+    isSpeaking ||
+    robotState === 'thinking' ||
+    robotState === 'speaking';
+
+  useEffect(() => {
+    isBusyThinkingOrRespondingRef.current = isBusyThinkingOrResponding;
+  }, [isBusyThinkingOrResponding]);
+
+  const processSelectedFile = async (file: File) => {
     // Strict validation: images only
     if (!file.type.startsWith('image/')) {
       setChatErrorMessage(
@@ -454,6 +566,21 @@ export default function App() {
       setChatErrorMessage(err?.message || "Erreur lors du traitement de l'image.");
     } finally {
       setIsProcessingImage(false);
+    }
+  };
+
+  const handlePaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const file = items[i].getAsFile();
+        if (file) {
+          e.preventDefault();
+          await processSelectedFile(file);
+          break;
+        }
+      }
     }
   };
 
@@ -490,6 +617,12 @@ export default function App() {
     // Immediately interrupt any previous answer, stream or speech:
     handleStop();
 
+    // Début de la réponse : la phase de salutation est définitivement terminée
+    setIsGreeting(false);
+    greetingAudioPlayedRef.current = true;
+    greetingTriggeredRef.current = true;
+    isBusyThinkingOrRespondingRef.current = true;
+
     const requestId = ++currentRequestIdRef.current;
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
@@ -500,6 +633,8 @@ export default function App() {
     setInput('');
     setSelectedImage(null);
     setIsResponseCardDismissed(false);
+    setHideResponseText(false);
+    setShowFullTextModal(false);
     inputRef.current?.blur();
     unlockAudioContext();
 
@@ -562,6 +697,7 @@ export default function App() {
 
       const payload = {
         deepseekApiKey: deepSeekKey || undefined,
+        isCallMode: isCallModalOpen,
         messages: newMessages.map((m) => ({
           role: m.role,
           content: m.content,
@@ -573,9 +709,19 @@ export default function App() {
               }
             : undefined,
         })),
-        customInstructions: imageToSend
-          ? `L'utilisateur a soumis une image pour analyse visuelle complète et détaillée. Analyse méticuleusement chaque élément visible, le sujet, le texte OCR éventuel, l'explication et la synthèse.`
-          : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`,
+        customInstructions: `${TRANSLATIONS[language].aiDirective}\n\n` + (
+          isCallModalOpen
+            ? (language === 'en'
+                ? `[LIVE HANDS-FREE VOICE CALL MODE] You are on a direct voice call with the user. Answer conversationally, clearly, fluently, and warmly in English.`
+                : `[MODE APPEL VOCAL MAINS LIBRES EN DIRECT] Tu es en appel téléphonique direct avec l'utilisateur. Ton premier cerveau est DeepSeek (et Gemini en second cerveau de secours). Réponds de manière fluide, claire, vivante et conversationnelle.`)
+            : imageToSend
+            ? (language === 'en'
+                ? `The user submitted an image for detailed visual inspection. Analyze each visible element, subject, OCR text if any, explanation and summary in English.`
+                : `L'utilisateur a soumis une image pour analyse visuelle complète et détaillée. Analyse méticuleusement chaque élément visible, le sujet, le texte OCR éventuel, l'explication et la synthèse.`)
+            : (language === 'en'
+                ? `Domain: ${currentDomain.label}. Provide a complete, rigorous, and detailed response in English.`
+                : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`)
+        ),
       };
 
       const tPayloadReady = performance.now();
@@ -894,11 +1040,23 @@ export default function App() {
 
   const handleClearMessages = () => {
     handleStop();
-    setMessages([INITIAL_BOT_MESSAGE]);
+    setMessages([
+      {
+        id: 'init-msg-1',
+        role: 'model',
+        content: TRANSLATIONS[language].greeting.content,
+        timestamp: Date.now(),
+        domain: 'Tous Domaines',
+      },
+    ]);
     triggerWarmGreeting(true);
   };
 
   const handleAvatarInteractiveClick = () => {
+    // Si le robot est en pleine réflexion ou en train de répondre, ignorer tout contact tactile
+    if (isBusyThinkingOrRespondingRef.current) {
+      return;
+    }
     unlockAudioContext();
     triggerWarmGreeting(true);
   };
@@ -907,6 +1065,64 @@ export default function App() {
   const renderChatInput = (maxWidthClass = 'max-w-3xl') => (
     <div className="w-full p-2.5 sm:p-4 bg-slate-950/90 border-t border-slate-800/80 shrink-0 backdrop-blur-md pb-safe">
       <div className={`${maxWidthClass} mx-auto relative flex flex-col gap-1.5 sm:gap-2`}>
+        {/* Quick-Launch Chips: Mode Appel Mains Libres & Scanner OCR & Maths */}
+        <div className="flex items-center px-1 overflow-x-auto pb-1 scrollbar-none gap-2">
+            <button
+              type="button"
+              onClick={handleLaunchCallModal}
+              className={`group shrink-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold shadow-md transition-all active:scale-95 ${
+                isCallQuotaExhausted
+                  ? 'bg-slate-900/60 border-slate-700/60 text-slate-400 opacity-70'
+                  : remainingCallSeconds <= 120
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-amber-950/40 animate-pulse'
+                  : 'bg-gradient-to-r from-emerald-500/15 via-teal-500/15 to-cyan-500/15 hover:from-emerald-500/25 hover:to-teal-500/25 border-emerald-500/40 hover:border-emerald-400 text-emerald-300 shadow-emerald-950/40'
+              }`}
+              title={
+                isCallQuotaExhausted
+                  ? TRANSLATIONS[language].input.callQuotaExhausted
+                  : `${TRANSLATIONS[language].input.launchCall} (${language === 'fr' ? 'Reste' : 'Remaining'} ${formatCallTime(remainingCallSeconds)})`
+              }
+            >
+              <span className="relative flex h-2 w-2">
+                {!isCallQuotaExhausted && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2 w-2 ${
+                    isCallQuotaExhausted ? 'bg-slate-500' : 'bg-emerald-400'
+                  }`}
+                ></span>
+              </span>
+              <Phone className="w-3.5 h-3.5 text-current group-hover:scale-110 transition-transform" />
+              <span>{TRANSLATIONS[language].input.handsFree}</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 font-mono">
+                {isCallQuotaExhausted ? '0 min' : `${Math.ceil(remainingCallSeconds / 60)}m`}
+              </span>
+            </button>
+
+            {/* Scanner OCR Universel Quick Button */}
+            <button
+              type="button"
+              onClick={() => setIsOcrModalOpen(true)}
+              className="group shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-cyan-500/40 bg-gradient-to-r from-cyan-500/15 to-blue-500/15 hover:from-cyan-500/25 hover:to-blue-500/25 text-cyan-300 text-xs font-semibold shadow-md transition-all active:scale-95"
+              title={language === 'fr' ? "Scanner un texte depuis une photo ou un document" : "Scan text from a photo or document"}
+            >
+              <ScanText className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform" />
+              <span>{TRANSLATIONS[language].input.ocr}</span>
+            </button>
+
+            {/* Résolveur Maths & Graphiques Quick Button */}
+            <button
+              type="button"
+              onClick={() => setIsMathModalOpen(true)}
+              className="group shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-purple-500/40 bg-gradient-to-r from-purple-500/15 via-indigo-500/15 to-cyan-500/15 hover:from-purple-500/25 hover:to-indigo-500/25 text-purple-200 text-xs font-semibold shadow-md transition-all active:scale-95"
+              title={language === 'fr' ? "Résoudre des équations pas à pas et tracer des graphiques" : "Solve equations step-by-step and plot graphs"}
+            >
+              <LineChart className="w-3.5 h-3.5 text-purple-400 group-hover:scale-110 transition-transform" />
+              <span>{TRANSLATIONS[language].input.math}</span>
+            </button>
+        </div>
+
         <div className="relative flex flex-col rounded-2xl bg-slate-900/90 border border-slate-700/80 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-xl transition-all overflow-hidden">
           {/* Selected image preview chip */}
           {selectedImage && (
@@ -921,17 +1137,21 @@ export default function App() {
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-cyan-300">
                   <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                  <span className="truncate">Image prête • Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash</span>
+                  <span className="truncate">
+                    {language === 'fr'
+                      ? 'Image prête • Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash'
+                      : 'Image ready • Recommended model: Gemini 2.0 Flash / 1.5 Flash'}
+                  </span>
                 </div>
                 <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                  {selectedImage.name || 'Image'} • {formatFileSize(selectedImage.size)} • Vision Haute Précision
+                  {selectedImage.name || 'Image'} • {formatFileSize(selectedImage.size)} • {language === 'fr' ? 'Vision Haute Précision' : 'High Precision Vision'}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setSelectedImage(null)}
                 className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition shrink-0"
-                title="Retirer cette image"
+                title={TRANSLATIONS[language].input.removeImage}
               >
                 <X className="w-4 h-4" />
               </button>
@@ -939,55 +1159,46 @@ export default function App() {
           )}
 
           <div className="relative flex items-center w-full min-h-[44px]">
-            {/* Left "+" Button for Image Analysis */}
-            <div className="pl-1.5 sm:pl-2 flex items-center shrink-0">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isProcessingImage}
-                title="Analyser une image avec SADIO (Modèle recommandé : Gemini 2.0 Flash / 1.5 Flash)"
-                className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 border ${
-                  selectedImage
-                    ? 'bg-cyan-500 text-slate-950 border-cyan-300 font-bold shadow-md shadow-cyan-500/30'
-                    : 'text-cyan-400 bg-cyan-950/40 hover:bg-cyan-500/20 border-cyan-500/40 hover:border-cyan-400/70 shadow-sm'
-                }`}
-              >
-                {isProcessingImage ? (
-                  <Cpu className="w-4 h-4 animate-spin text-cyan-300" />
-                ) : (
-                  <Plus className="w-5 h-5 transition-transform duration-200 hover:rotate-90" />
-                )}
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,image/heic,image/*"
-                className="hidden"
-                onChange={handleImageSelect}
-              />
-            </div>
-
             <textarea
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder={
                 selectedImage
-                  ? "Question sur l'image ou [Entrée] pour analyse complète..."
-                  : "Posez votre question à SADIO (vocal ou texte)..."
+                  ? TRANSLATIONS[language].input.placeholderImage
+                  : TRANSLATIONS[language].input.placeholderNormal
               }
               rows={1}
-              className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-2 sm:pl-3 pr-24 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
+              className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-3.5 sm:pl-4 pr-32 sm:pr-36 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
             />
 
             <div className="absolute right-1.5 sm:right-2 flex items-center gap-1">
+              {/* Hands-Free Call Mode Quick Button */}
+              <button
+                type="button"
+                onClick={handleLaunchCallModal}
+                title={
+                  isCallQuotaExhausted
+                    ? TRANSLATIONS[language].input.callQuotaExhausted
+                    : `${TRANSLATIONS[language].input.launchCall} (${language === 'fr' ? 'Reste' : 'Remaining'} ${formatCallTime(remainingCallSeconds)})`
+                }
+                className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl border transition-all active:scale-95 shadow-sm ${
+                  isCallQuotaExhausted
+                    ? 'text-slate-500 border-slate-800 bg-slate-900/40 opacity-50'
+                    : 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50 border-emerald-500/30 hover:border-emerald-400/60'
+                }`}
+              >
+                <Phone className="w-4 h-4" />
+              </button>
+
               {/* Voice speech-to-text mic */}
               {isSpeechSupported && (
                 <button
                   type="button"
                   onClick={toggleListening}
-                  title={isListening ? 'Arrêter la dictée vocale' : 'Parler au robot (Microphone)'}
+                  title={isListening ? TRANSLATIONS[language].input.stopMic : TRANSLATIONS[language].input.startMic}
                   className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl transition-all active:scale-95 ${
                     isListening
                       ? 'bg-rose-500 text-white animate-pulse shadow-md shadow-rose-500/30'
@@ -1004,7 +1215,7 @@ export default function App() {
                   type="button"
                   onClick={handleStop}
                   className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-rose-600/90 hover:bg-rose-500 text-white shadow-md shadow-rose-600/25 transition-all active:scale-95 animate-pulse"
-                  title="Arrêter la réponse et la lecture"
+                  title={TRANSLATIONS[language].input.stop}
                 >
                   <Square className="w-4 h-4 fill-current" />
                 </button>
@@ -1014,25 +1225,13 @@ export default function App() {
                   onClick={() => handleSendMessage()}
                   disabled={!input.trim() && !selectedImage}
                   className="min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-md shadow-cyan-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed active:scale-95"
-                  title={selectedImage ? "Lancer l'analyse de l'image" : "Envoyer la question"}
+                  title={selectedImage ? (language === 'fr' ? "Lancer l'analyse de l'image" : "Analyze image") : TRANSLATIONS[language].input.send}
                 >
                   <Send className="w-4 h-4" />
                 </button>
               )}
             </div>
           </div>
-        </div>
-
-        <div className="flex items-center justify-between px-1.5 sm:px-2 text-[10px] sm:text-[11px] text-slate-500">
-          <span className="flex items-center gap-1 truncate">
-            <Sparkles className="w-3 h-3 text-cyan-400 shrink-0" />
-            <span className="truncate">
-              Bouton [+] pour analyser des images • Modèle Vision Recommandé : Gemini 2.0 Flash / 1.5 Flash
-            </span>
-          </span>
-          <span className="font-mono text-[10px] text-slate-400 shrink-0 hidden sm:inline">
-            [Entrée] pour envoyer
-          </span>
         </div>
       </div>
     </div>
@@ -1041,7 +1240,23 @@ export default function App() {
   const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
   const latestBotMessage = [...messages].reverse().find((m) => m.role === 'model' && m.id !== 'init-msg-1');
   const activeAnswerText = isStreaming ? streamingContent : (latestBotMessage?.content || '');
-  const hasAnswerToShow = Boolean(activeAnswerText && activeAnswerText.trim().length > 0 && !isResponseCardDismissed && !hideResponseText);
+  const hasAnswerToShow = Boolean(activeAnswerText && activeAnswerText.trim().length > 0 && !isResponseCardDismissed);
+
+  // Proposition 2: Phrase active affichée dans le bandeau de sous-titres HUD cinéma
+  const activeSubtitleText = useMemo(() => {
+    if (isSpeaking && currentSentence) {
+      return currentSentence;
+    }
+    if (isStreaming && streamingContent) {
+      const sentences = streamingContent.split(/(?<=[.!?…\n])\s+/).filter(Boolean);
+      return sentences[sentences.length - 1] || streamingContent.slice(-140);
+    }
+    if (latestBotMessage?.content) {
+      const firstSentence = latestBotMessage.content.split(/(?<=[.!?…\n])\s+/).filter(Boolean)[0];
+      return firstSentence || latestBotMessage.content.slice(0, 140);
+    }
+    return '';
+  }, [isSpeaking, currentSentence, isStreaming, streamingContent, latestBotMessage?.content]);
 
   return (
     <div className="flex flex-col h-[100dvh] min-h-[100dvh] w-full bg-[#070b14] text-slate-100 overflow-hidden font-sans">
@@ -1055,6 +1270,10 @@ export default function App() {
         onOpenAuth={() => setIsAuthModalOpen(true)}
         onOpenSubscription={() => setIsSubscriptionModalOpen(true)}
         onLogout={handleLogout}
+        voiceEnabled={voiceEnabled}
+        onToggleVoice={handleToggleVoice}
+        language={language}
+        onChangeLanguage={handleLanguageChange}
       />
 
       {/* Payment return feedback banner */}
@@ -1140,7 +1359,7 @@ export default function App() {
               onAvatarClick={handleAvatarInteractiveClick}
               isThinking={isThinking}
               thinkingCountdown={isThinking ? thinkingSeconds : null}
-              isGreeting={isGreeting}
+              isGreeting={Boolean(isGreeting && !isBusyThinkingOrRespondingRef.current)}
               greetingText="« Bonjour et bienvenue ! C'est un réel plaisir de vous accueillir. Je me tiens debout au centre de votre écran, entièrement prêt pour vos questions ! »"
               onReplayGreeting={() => triggerWarmGreeting(true)}
               isVoicing={isVoicing}
@@ -1167,14 +1386,16 @@ export default function App() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-xs text-white tracking-wide">
-                        SADIO analyse votre question...
+                        {language === 'fr' ? 'SADIO analyse votre question...' : 'SADIO is analyzing your question...'}
                       </span>
                       <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-bold border border-cyan-400/40">
                         {thinkingSeconds ?? 5}s
                       </span>
                     </div>
                     <p className="text-[10px] text-slate-400 mt-0.5">
-                      Analyse cognitive • Début de la réponse vocale dans {thinkingSeconds ?? 5}s
+                      {language === 'fr'
+                        ? `Analyse cognitive • Début de la réponse vocale dans ${thinkingSeconds ?? 5}s`
+                        : `Cognitive analysis • Voice response starting in ${thinkingSeconds ?? 5}s`}
                     </p>
                   </div>
                 </div>
@@ -1190,132 +1411,155 @@ export default function App() {
             </div>
           )}
 
-          {/* Cyber Response Dialogue Box: Displays SADIO's full answer clearly on screen for reading */}
-          {hasAnswerToShow && (
-            <div className="absolute inset-x-2 sm:inset-x-4 bottom-2 sm:bottom-3 z-30 max-w-2xl mx-auto rounded-2xl bg-slate-950/95 border-2 border-cyan-500/70 shadow-[0_0_35px_rgba(6,182,212,0.4)] backdrop-blur-xl animate-fade-in flex flex-col max-h-[50vh] sm:max-h-[55vh] overflow-hidden">
-              {/* Header */}
-              <div className="flex items-center justify-between px-3 py-2 bg-slate-900/90 border-b border-cyan-500/30 gap-2 shrink-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="w-6 h-6 rounded-lg bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
-                    <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-xs text-white">Réponse de SADIO</span>
-                      {isStreaming && (
-                        <span className="text-[10px] font-mono text-cyan-300 animate-pulse bg-cyan-500/20 px-1.5 py-0.5 rounded border border-cyan-500/30">
-                          Rédaction en direct...
-                        </span>
-                      )}
-                    </div>
-                    {latestUserMessage && (
-                      <p className="text-[11px] text-slate-400 truncate max-w-[200px] xs:max-w-xs sm:max-w-md">
-                        Q : « {latestUserMessage.content} »
-                      </p>
-                    )}
-                  </div>
+          {/* PROPOSITION 2 : BANDEAU DE SOUS-TITRES CYBERNÉTIQUES (STYLE CINÉMA / HUD) */}
+          {hasAnswerToShow && activeSubtitleText && (
+            <div className="absolute bottom-2.5 sm:bottom-3 inset-x-2 sm:inset-x-4 max-w-xl mx-auto z-30 animate-fade-in pointer-events-auto">
+              <div className="relative rounded-2xl bg-slate-950/85 border border-cyan-500/50 shadow-[0_0_30px_rgba(6,182,212,0.35)] backdrop-blur-md px-3.5 sm:px-4 py-2 sm:py-2.5 flex items-center gap-2.5 sm:gap-3 transition-all">
+                {/* Glowing Audio Pulse Indicator */}
+                <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/50">
+                  {isSpeaking ? (
+                    <>
+                      <Radio className="w-4 h-4 text-cyan-300 animate-pulse" />
+                      <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
+                    </>
+                  ) : (
+                    <Sparkles className="w-4 h-4 text-cyan-400" />
+                  )}
                 </div>
 
+                {/* Subtitle Content (1 to 2 lines max, smoothly transitioning like cinema subtitles) */}
+                <div
+                  onClick={() => setShowFullTextModal(true)}
+                  className="flex-1 min-w-0 cursor-pointer"
+                  title={language === 'fr' ? "Cliquer pour afficher la réponse complète" : "Click to view full answer"}
+                >
+                  <div className="flex items-center gap-1.5 mb-0.5">
+                    <span className="text-[10px] font-mono font-bold tracking-wider uppercase text-cyan-400 flex items-center gap-1">
+                      <span>SADIO</span>
+                      <span className="text-slate-500">•</span>
+                      <span>
+                        {isSpeaking
+                          ? (language === 'fr' ? 'Lecture vocale' : 'Speaking')
+                          : isStreaming
+                          ? (language === 'fr' ? 'Rédaction...' : 'Writing...')
+                          : (language === 'fr' ? 'Sous-titre' : 'Subtitles')}
+                      </span>
+                    </span>
+                  </div>
+                  <p
+                    key={activeSubtitleText}
+                    className="text-xs sm:text-sm text-slate-100 font-sans font-medium leading-snug line-clamp-2 selection:bg-cyan-500/30 animate-fade-in"
+                  >
+                    « {activeSubtitleText.replace(/^["'«»\s]+|["'«»\s]+$/g, '')} »
+                  </p>
+                </div>
+
+                {/* HUD Controls */}
                 <div className="flex items-center gap-1 shrink-0">
-                  {/* Listen / Stop audio button */}
+                  {/* Listen / Stop audio */}
                   {isSpeaking ? (
                     <button
+                      type="button"
                       onClick={handleStop}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-rose-500/20 border border-rose-500/40 text-rose-300 text-[11px] hover:bg-rose-500/30 transition active:scale-95"
-                      title="Arrêter la voix"
+                      className="p-1.5 rounded-xl bg-rose-500/20 border border-rose-500/40 text-rose-300 hover:bg-rose-500/30 transition active:scale-95 shadow-sm"
+                      title={language === 'fr' ? "Arrêter la voix" : "Stop voice"}
                     >
-                      <Square className="w-3 h-3 fill-current" />
-                      <span className="hidden xs:inline">Arrêter</span>
+                      <Square className="w-3.5 h-3.5 fill-current" />
                     </button>
                   ) : (
                     <button
+                      type="button"
                       onClick={() => {
                         unlockAudioContext();
                         speak(activeAnswerText);
                       }}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 text-[11px] font-medium hover:bg-cyan-500/30 transition active:scale-95 shadow-sm"
-                      title="Écouter la voix de SADIO"
+                      className="p-1.5 rounded-xl bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 hover:bg-cyan-500/30 transition active:scale-95 shadow-sm"
+                      title={language === 'fr' ? "Écouter la voix de SADIO" : "Listen to SADIO's voice"}
                     >
                       <Volume2 className="w-3.5 h-3.5" />
-                      <span>Écouter</span>
                     </button>
                   )}
 
-                  {/* Copy button */}
+                  {/* View Full Text Modal Button */}
                   <button
+                    type="button"
+                    onClick={() => setShowFullTextModal(true)}
+                    className="p-1.5 rounded-xl text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition active:scale-95"
+                    title={language === 'fr' ? "Afficher la réponse complète" : "Show full answer"}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                  </button>
+
+                  {/* Copy Button */}
+                  <button
+                    type="button"
                     onClick={() => {
                       navigator.clipboard.writeText(activeAnswerText);
                       setCopiedResponse(true);
                       setTimeout(() => setCopiedResponse(false), 2000);
                     }}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
-                    title="Copier le texte de la réponse"
+                    className="p-1.5 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition active:scale-95"
+                    title={language === 'fr' ? "Copier toute la réponse" : "Copy full answer"}
                   >
                     {copiedResponse ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                   </button>
 
-                  {/* Dismiss / Close button */}
+                  {/* Export Audio Podcast Button */}
                   <button
+                    type="button"
+                    onClick={() => exportTextAsAudioPodcast(activeAnswerText, currentDomain.label || 'SADIO')}
+                    className="p-1.5 rounded-xl text-slate-400 hover:text-emerald-300 hover:bg-slate-800 transition active:scale-95 flex items-center gap-1"
+                    title="Télécharger la réponse en podcast audio"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                  </button>
+
+                  {/* Dismiss HUD Bar Button */}
+                  <button
+                    type="button"
                     onClick={() => setIsResponseCardDismissed(true)}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition"
-                    title="Masquer la boîte de réponse"
+                    className="p-1.5 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-slate-800 transition active:scale-95"
+                    title="Masquer le bandeau"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
               </div>
-
-              {/* If an image was analyzed, display an image banner strip */}
-              {latestUserMessage?.image && (
-                <div className="flex items-center gap-2.5 px-3 py-1.5 bg-slate-900/90 border-b border-cyan-500/20 text-xs shrink-0">
-                  <img
-                    src={latestUserMessage.image.dataUrl}
-                    alt="Image analysée"
-                    className="w-8 h-8 rounded-lg object-cover border border-cyan-500/40 shadow-sm shrink-0"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <span className="font-semibold text-cyan-300 text-[11px] flex items-center gap-1">
-                      <ImageIcon className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <span className="truncate">Image analysée par Gemini 2.0 Flash / 1.5 Flash : {latestUserMessage.image.name || 'Image'}</span>
-                    </span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      {latestUserMessage.image.size ? formatFileSize(latestUserMessage.image.size) : 'Vision'} • Analyse visuelle haute précision
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Scrollable Rich Content Body */}
-              <div className="flex-1 overflow-y-auto p-3 sm:p-4 text-xs sm:text-sm text-slate-100 leading-relaxed font-sans select-text">
-                <ChatMessageItem
-                  message={{
-                    id: latestBotMessage?.id || 'live-stream',
-                    role: 'model',
-                    content: activeAnswerText,
-                    timestamp: latestBotMessage?.timestamp || Date.now(),
-                    domain: currentDomain.label,
-                  }}
-                  hideResponseText={false}
-                  isStreaming={isStreaming}
-                  onSpeak={(text) => {
-                    unlockAudioContext();
-                    speak(text);
-                  }}
-                  onStopSpeak={handleStop}
-                  isSpeakingThis={isSpeaking}
-                />
-              </div>
             </div>
           )}
 
-          {/* Re-open response pill if user dismissed the card */}
+          {/* Full Text Modal avec Suivi Karaoké en temps réel (Proposition 1 intégrée) */}
+          <KaraokeReaderModal
+            isOpen={showFullTextModal && hasAnswerToShow}
+            onClose={() => setShowFullTextModal(false)}
+            fullText={activeAnswerText}
+            isSpeaking={isSpeaking}
+            currentSentence={currentSentence}
+            currentSentenceIndex={currentSentenceIndex}
+            currentWordIndex={currentWordIndex}
+            currentSpokenWord={currentSpokenWord}
+            currentCharIndex={currentCharIndex}
+            onSpeak={(text) => {
+              unlockAudioContext();
+              speak(text);
+            }}
+            onSpeakFromSentence={(sentenceIdx) => {
+              unlockAudioContext();
+              speakFromSentenceIndex(sentenceIdx, activeAnswerText);
+            }}
+            onStop={handleStop}
+            isStreaming={isStreaming}
+            domainLabel={currentDomain.label}
+          />
+
+          {/* Re-open subtitle pill if user dismissed the HUD */}
           {isResponseCardDismissed && latestBotMessage && (
             <button
               onClick={() => setIsResponseCardDismissed(false)}
               className="absolute bottom-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900/90 border border-cyan-500/50 text-cyan-300 text-xs shadow-lg backdrop-blur-md hover:bg-cyan-500/20 transition active:scale-95 animate-fade-in"
             >
-              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Afficher la réponse de SADIO</span>
+              <FileText className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Afficher les sous-titres</span>
             </button>
           )}
         </div>
@@ -1335,6 +1579,13 @@ export default function App() {
         onSelectVoice={setSelectedVoice}
         messages={messages}
         onClearMessages={handleClearMessages}
+        usedCallSeconds={usedCallSeconds}
+        voiceEnabled={voiceEnabled}
+        onToggleVoice={handleToggleVoice}
+        onTestVoice={testVoice}
+        onTestSpecificVoice={testSpecificVoice}
+        language={language}
+        onChangeLanguage={handleLanguageChange}
       />
 
       {/* PWA Offline Notification Indicator */}
@@ -1359,6 +1610,56 @@ export default function App() {
         user={user}
         access={access}
         token={token}
+      />
+
+      {/* Mode Appel Mains Libres (Max 20 minutes cumulées / jour) */}
+      <HandsFreeCallModal
+        isActive={isCallModalOpen}
+        onClose={handleCloseCallModal}
+        onSendMessage={handleSendMessage}
+        isSpeaking={isSpeaking}
+        isThinking={isThinking}
+        isStreaming={isStreaming}
+        currentSentence={currentSentence}
+        onStopSpeech={handleStop}
+        onOpenDocumentModal={() => setShowFullTextModal(true)}
+        totalUsedSeconds={usedCallSeconds}
+        onTickUsedSeconds={handleTickUsedCallSeconds}
+        language={language}
+      />
+
+      {/* Scanner OCR Universel (100% 0 F) Modal */}
+      <OcrScannerModal
+        isOpen={isOcrModalOpen}
+        onClose={() => setIsOcrModalOpen(false)}
+        onApplyTextToInput={(extractedText) => {
+          setInput(extractedText);
+          inputRef.current?.focus();
+        }}
+        onSpeakText={(text) => {
+          unlockAudioContext();
+          speak(text);
+        }}
+        onSolveMath={(scannedMath) => {
+          setIsOcrModalOpen(false);
+          setMathEquationToSolve(scannedMath.trim());
+          setIsMathModalOpen(true);
+        }}
+      />
+
+      {/* Résolveur Étape par Étape & Traceur de Graphiques Mathématiques (100% 0 F) */}
+      <MathSolverModal
+        isOpen={isMathModalOpen}
+        onClose={() => setIsMathModalOpen(false)}
+        initialEquation={mathEquationToSolve}
+        onApplyTextToInput={(text) => {
+          setInput(text);
+          inputRef.current?.focus();
+        }}
+        onSpeakText={(text) => {
+          unlockAudioContext();
+          speak(text);
+        }}
       />
     </div>
   );

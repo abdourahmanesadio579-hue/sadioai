@@ -62,8 +62,8 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   const isExpired = access?.status === 'expired';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in">
-      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden p-6 sm:p-8 space-y-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/85 backdrop-blur-md animate-fade-in overflow-y-auto">
+      <div className="relative w-full max-w-lg bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-y-auto max-h-[92dvh] p-5 sm:p-8 space-y-4 sm:space-y-6">
         {/* Close button (only if not strictly expired block) */}
         {!isExpired && (
           <button

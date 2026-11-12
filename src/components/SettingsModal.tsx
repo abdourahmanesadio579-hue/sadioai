@@ -1,7 +1,9 @@
 import React from 'react';
 import { RobotTheme, ChatMessage } from '../types/chat';
-import { X, Palette, Volume2, Trash2, ShieldCheck, Play, Check, RotateCcw, Sparkles, Cpu, Download } from 'lucide-react';
+import { X, Palette, Volume2, Trash2, ShieldCheck, Play, Check, RotateCcw, Sparkles, Cpu, Download, Phone, Globe } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
+import { MAX_DAILY_CALL_SECONDS, formatCallTime } from '../utils/callQuota';
+import { Language, TRANSLATIONS } from '../utils/i18n';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -15,6 +17,13 @@ interface SettingsModalProps {
   onChangeSpeechRate?: (rate: number) => void;
   messages: ChatMessage[];
   onClearMessages: () => void;
+  usedCallSeconds?: number;
+  voiceEnabled?: boolean;
+  onToggleVoice?: () => void;
+  onTestVoice?: () => void;
+  onTestSpecificVoice?: (voice: SpeechSynthesisVoice) => void;
+  language?: Language;
+  onChangeLanguage?: (lang: Language) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -28,8 +37,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   speechRate = 1.0,
   onChangeSpeechRate,
   onClearMessages,
+  usedCallSeconds = 0,
+  voiceEnabled = true,
+  onToggleVoice,
+  onTestVoice,
+  onTestSpecificVoice,
+  language = 'fr',
+  onChangeLanguage,
 }) => {
   const [showClearConfirm, setShowClearConfirm] = React.useState(false);
+  const [onlyPremium, setOnlyPremium] = React.useState(false);
+  const t = TRANSLATIONS[language].settings;
 
   if (!isOpen) return null;
 
@@ -52,15 +70,54 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         <div className="flex items-center gap-2.5 mb-5 pb-3 border-b border-slate-800">
           <ShieldCheck className="w-5 h-5 text-cyan-400" />
-          <h2 className="text-base font-bold text-white">Paramètres de SADIO</h2>
+          <h2 className="text-base font-bold text-white">{t.title}</h2>
         </div>
 
         <div className="space-y-5">
+          {/* Language Selector */}
+          {onChangeLanguage && (
+            <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-200 mb-1">
+                <Globe className="w-4 h-4 text-cyan-400" />
+                <span>{t.languageSection}</span>
+              </label>
+              <p className="text-[11px] text-slate-400 mb-2.5">
+                {t.languageDesc}
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => onChangeLanguage('fr')}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-semibold transition active:scale-95 ${
+                    language === 'fr'
+                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-sm shadow-cyan-500/20'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span className="text-base">🇫🇷</span>
+                  <span>{t.frenchLabel}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeLanguage('en')}
+                  className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl border text-xs font-semibold transition active:scale-95 ${
+                    language === 'en'
+                      ? 'bg-cyan-500/20 border-cyan-400 text-cyan-300 shadow-sm shadow-cyan-500/20'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span className="text-base">🇬🇧</span>
+                  <span>{t.englishLabel}</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Theme Selector */}
           <div>
             <label className="flex items-center gap-2 text-xs font-semibold text-slate-300 mb-2.5">
               <Palette className="w-4 h-4 text-cyan-400" />
-              <span>Châssis & Thème Lumineux du Robot</span>
+              <span>{t.themeSection}</span>
             </label>
             <div className="grid grid-cols-2 gap-2">
               {themes.map((t) => (
@@ -88,45 +145,146 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {/* Voice Switch & Voice Selector */}
           <div className="space-y-2.5">
-
-
-            {/* Select Voice Dropdown - Strictly French voices */}
-            {availableVoices.length > 0 && onSelectVoice && (
-              <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-slate-300 font-medium">Voix française de SADIO :</span>
-                  <span className="text-[10px] text-cyan-400 font-mono">
-                    {selectedVoice ? 'Française' : 'Par défaut'}
-                  </span>
+            {/* Voice Switch & Test Voice */}
+            <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className={`p-2 rounded-lg ${voiceEnabled ? 'bg-cyan-500/20 text-cyan-300' : 'bg-slate-800 text-slate-500'}`}>
+                  <Volume2 className="w-4 h-4" />
                 </div>
-                <select
-                  value={selectedVoice?.name || ''}
-                  onChange={(e) => {
-                    const chosen = availableVoices.find((v) => v.name === e.target.value);
-                    if (chosen) onSelectVoice(chosen);
-                  }}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
-                >
-                  {availableVoices.map((voice) => {
-                    const isGoogle = voice.name.toLowerCase().includes('google');
-                    const isEnhanced =
-                      voice.name.toLowerCase().includes('enhanced') ||
-                      voice.name.toLowerCase().includes('natural') ||
-                      voice.name.toLowerCase().includes('network') ||
-                      voice.name.toLowerCase().includes('neural');
-                    const badge = isGoogle ? '⭐ ' : isEnhanced ? '✨ ' : '';
-                    return (
-                      <option key={voice.name} value={voice.name}>
-                        {badge}{voice.name} ({voice.lang})
-                      </option>
-                    );
-                  })}
-                </select>
-                <p className="text-[10px] text-slate-400 leading-tight">
-                  💡 Astuce mobile : Privilégiez les voix <strong>⭐ Google</strong> ou <strong>✨ Naturelle / Haute fidélité</strong> pour un timbre vocal fluide, naturel et sans effet robotique.
-                </p>
+                <div>
+                  <div className="text-xs text-slate-200 font-medium">Lecture vocale de SADIO</div>
+                  <div className="text-[10px] text-slate-400">
+                    {voiceEnabled ? 'Activée (SADIO répond à voix haute)' : 'Coupée (mode silencieux)'}
+                  </div>
+                </div>
               </div>
-            )}
+              <div className="flex items-center gap-2">
+                {onTestVoice && (
+                  <button
+                    type="button"
+                    onClick={onTestVoice}
+                    className="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 text-[11px] font-semibold hover:bg-cyan-500/25 transition active:scale-95 flex items-center gap-1"
+                  >
+                    <Play className="w-3 h-3" />
+                    Tester
+                  </button>
+                )}
+                {onToggleVoice && (
+                  <button
+                    type="button"
+                    onClick={onToggleVoice}
+                    className={`w-11 h-6 rounded-full transition-colors relative p-0.5 ${
+                      voiceEnabled ? 'bg-cyan-500' : 'bg-slate-700'
+                    }`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                        voiceEnabled ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                )}
+              </div>
+            </div>
+
+
+            {/* Select Voice Dropdown - Filter premium / high quality voices */}
+            {availableVoices.length > 0 && onSelectVoice && (() => {
+              const premiumVoices = availableVoices.filter((v) => {
+                const n = v.name.toLowerCase();
+                return (
+                  n.includes('google') ||
+                  n.includes('enhanced') ||
+                  n.includes('natural') ||
+                  n.includes('network') ||
+                  n.includes('neural') ||
+                  n.includes('premium') ||
+                  n.includes('wavenet') ||
+                  n.includes('siri') ||
+                  n.includes('thomas') ||
+                  n.includes('audrey') ||
+                  n.includes('aurélie') ||
+                  n.includes('nicolas') ||
+                  n.includes('hortense') ||
+                  n.includes('paul') ||
+                  n.includes('julie') ||
+                  n.includes('online')
+                );
+              });
+
+              const voicesToDisplay = onlyPremium ? (premiumVoices.length > 0 ? premiumVoices : availableVoices) : availableVoices;
+
+              return (
+                <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-slate-300 font-medium">Voix française de SADIO :</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-cyan-400 font-mono px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/30">
+                        {premiumVoices.length} premium / {availableVoices.length} total
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Filter Toggle Checkbox */}
+                  <label className="flex items-center gap-2 cursor-pointer pt-0.5">
+                    <input
+                      type="checkbox"
+                      checked={onlyPremium}
+                      onChange={(e) => setOnlyPremium(e.target.checked)}
+                      className="rounded bg-slate-900 border-slate-700 text-cyan-500 focus:ring-cyan-500/30 h-3.5 w-3.5"
+                    />
+                    <span className="text-[11px] text-cyan-300 font-medium select-none">
+                      ✨ Afficher uniquement les voix premium / haute qualité
+                    </span>
+                  </label>
+
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={selectedVoice?.name || ''}
+                      onChange={(e) => {
+                        const chosen = availableVoices.find((v) => v.name === e.target.value);
+                        if (chosen) onSelectVoice(chosen);
+                      }}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
+                    >
+                      {voicesToDisplay.map((voice) => {
+                        const isGoogle = voice.name.toLowerCase().includes('google');
+                        const isEnhanced =
+                          voice.name.toLowerCase().includes('enhanced') ||
+                          voice.name.toLowerCase().includes('natural') ||
+                          voice.name.toLowerCase().includes('network') ||
+                          voice.name.toLowerCase().includes('neural');
+                        const badge = isGoogle ? '⭐ ' : isEnhanced ? '✨ ' : '';
+                        return (
+                          <option key={voice.name} value={voice.name}>
+                            {badge}{voice.name} ({voice.lang})
+                          </option>
+                        );
+                      })}
+                    </select>
+
+                    {onTestSpecificVoice && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const targetVoice = selectedVoice || voicesToDisplay[0];
+                          if (targetVoice) onTestSpecificVoice(targetVoice);
+                        }}
+                        className="px-3 py-2 rounded-lg bg-gradient-to-r from-emerald-500/25 to-teal-500/25 border border-emerald-500/50 text-emerald-300 text-xs font-semibold hover:bg-emerald-500/35 transition active:scale-95 flex items-center gap-1.5 shrink-0 shadow-sm"
+                        title="Tester cette voix avant de la sélectionner définitivement"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        <span>Tester</span>
+                      </button>
+                    )}
+                  </div>
+
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    💡 Sélectionnez une voix dans la liste puis cliquez sur <strong>Tester</strong> pour écouter son timbre avant de valider.
+                  </p>
+                </div>
+              );
+            })()}
 
             {/* Speed / Débit de parole Selector */}
             {onChangeSpeechRate && (
@@ -223,6 +381,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <li><strong className="text-slate-200">Précision totale</strong> : Transcription OCR fidèle, description détaillée des scènes et diagnostics.</li>
               <li><strong className="text-slate-200">Économique</strong> : Tarif ultra-accessible (~0,10 $ / 1M tokens) permettant des milliers d'analyses d'images à coût minime.</li>
             </ul>
+          </div>
+
+          {/* Quota d'Appel Mains Libres Quotidien */}
+          <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Phone className="w-4 h-4 text-emerald-400" />
+                <span className="text-xs font-semibold text-slate-200">Quota d'Appel Vocal (20 min/jour)</span>
+              </div>
+              <span className="text-[11px] font-mono font-bold text-emerald-300">
+                {formatCallTime(Math.max(0, MAX_DAILY_CALL_SECONDS - (usedCallSeconds || 0)))} restant
+              </span>
+            </div>
+            <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+              <div
+                className="bg-emerald-400 h-full rounded-full transition-all"
+                style={{
+                  width: `${Math.min(100, (((usedCallSeconds || 0)) / MAX_DAILY_CALL_SECONDS) * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-slate-400">
+              <span>Consommé aujourd'hui : {formatCallTime(usedCallSeconds || 0)} / 20:00</span>
+              <span className="text-slate-500 font-mono">Reset auto à 00h00 GMT</span>
+            </div>
           </div>
 
           {/* Action: PWA Install */}

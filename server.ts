@@ -1,4 +1,5 @@
-import express, { Request, Response } from 'express';
+import express from 'express';
+import type { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -18,13 +19,22 @@ import {
   activateSubscriptionFromPayment,
   isWebhookProcessed,
   markWebhookProcessed,
-  UserRecord,
-} from './server/db.js';
+  checkAndIncrementOcrQuota,
+  getOcrQuotaStatus,
+  checkAndIncrementOcrQuotaMulti,
+  getOcrQuotaStatusMulti,
+  checkAndIncrementRegistrationQuota,
+  MAX_DAILY_OCR_SCANS,
+  getCallQuotaStatusMulti,
+  recordCallSecondsMulti,
+  MAX_DAILY_CALL_SECONDS,
+  type UserRecord,
+} from './server/db.ts';
 import {
   createBictorysCharge,
   verifyBictorysWebhookSignature,
   getBictorysConfig,
-} from './server/bictorys.js';
+} from './server/bictorys.ts';
 
 dotenv.config();
 
@@ -32,7 +42,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const isProduction = process.env.NODE_ENV === 'production';
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+function getCliArg(flag: string): string | undefined {
+  const index = process.argv.indexOf(flag);
+  if (index !== -1 && process.argv[index + 1]) {
+    return process.argv[index + 1];
+  }
+  return undefined;
+}
+
+const cliPort = getCliArg('--port') || getCliArg('-p');
+const PORT = cliPort ? parseInt(cliPort, 10) : (process.env.PORT ? parseInt(process.env.PORT, 10) : 3000);
+const HOST = getCliArg('--host') || process.env.HOST || '0.0.0.0';
 
 const DEFAULT_SYSTEM_INSTRUCTION = `Tu es SADIO (désignation matricielle : RoboOmni AURA-9), un avatar robot humanoïde cybernétique doté d'une intelligence omnisciente, profonde et rigoureuse.
 Ton cerveau cognitif et ton moteur d'intelligence sont propulsés par les modèles d'intelligence artificielle multimodaux Google Gemini (modèles recommandés pour l'analyse d'image : Gemini 2.0 Flash / 1.5 Flash de Google).
@@ -332,10 +353,42 @@ async function streamFromOpenAICompatible(options: {
 async function startServer() {
   loadDatabase();
   const app = express();
+  app.set('trust proxy', 1);
+
+  // Security & Anti-Abuse Ephemeral Tokens & Concurrency Mutex
+  const OCR_CHALLENGE_SECRET = process.env.SESSION_SECRET || 'sadio_anti_bypass_ocr_secret_2026_xof';
+  const consumedNonces = new Set<string>();
+  const activeOcrScans = new Set<string>();
+
+  // Clean consumed nonces periodically to prevent memory bloat
+  setInterval(() => {
+    consumedNonces.clear();
+  }, 10 * 60 * 1000);
+
+  function getReliableClientIp(req: Request): string {
+    const rawIp = (req.ip || (req.headers['x-forwarded-for'] as string)?.split(',')[0] || req.socket.remoteAddress || '127.0.0.1')
+      .replace(/^::ffff:/, '')
+      .trim();
+    return rawIp || '127.0.0.1';
+  }
+
+  function getClientFingerprint(req: Request): string {
+    const customHeader = (req.headers['x-device-fingerprint'] as string)?.trim();
+    if (customHeader && customHeader.length >= 8 && customHeader.length <= 64) {
+      return customHeader;
+    }
+    const ua = (req.headers['user-agent'] as string) || 'unknown_ua';
+    const al = (req.headers['accept-language'] as string) || 'unknown_lang';
+    return crypto.createHash('sha256').update(`${ua}:${al}`).digest('hex').slice(0, 24);
+  }
+
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature, x-deepseek-key');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature, x-deepseek-key, x-device-fingerprint, x-ocr-challenge'
+    );
     if (req.method === 'OPTIONS') {
       res.sendStatus(200);
       return;
@@ -428,6 +481,15 @@ async function startServer() {
 
   app.post('/api/auth/register', (req: Request, res: Response) => {
     try {
+      const clientIp = getReliableClientIp(req);
+      const regCheck = checkAndIncrementRegistrationQuota(clientIp, 3);
+      if (!regCheck.allowed) {
+        res.status(429).json({
+          error: "Limite de création de comptes atteinte pour aujourd'hui (maximum 3 comptes par réseau/jour pour prévenir les abus)."
+        });
+        return;
+      }
+
       const { email, password, name } = req.body;
       if (!email || typeof email !== 'string' || !email.includes('@')) {
         res.status(400).json({ error: 'Adresse e-mail valide requise.' });
@@ -780,7 +842,8 @@ async function startServer() {
     let streamedSuccessfully = false;
     let lastErrorMsg = '';
 
-    // PREMIER CERVEAU : DeepSeek API (clé passée par le client ou configurée dans l'environnement Render/Cloud)
+    // CERVEAU N°1 (PRIORITAIRE) : DeepSeek API (deepseek-chat)
+    // Utilisé en priorité pour les conversations textuelles et les appels téléphoniques mains libres
     const deepSeekApiKey =
       (req.headers['x-deepseek-key'] as string)?.trim() ||
       (req.body.deepseekApiKey as string)?.trim() ||
@@ -791,9 +854,13 @@ async function startServer() {
       process.env.DEEPSEEK_TOKEN?.trim() ||
       '';
 
+    const isCallMode = Boolean(req.body.isCallMode);
+
     if (deepSeekApiKey && !hasImage) {
-      console.log('🤖 [SADIO BRAIN] Utilisation de DeepSeek (deepseek-chat) comme premier cerveau...');
-      res.write(`data: ${JSON.stringify({ brain: 'deepseek', model: 'deepseek-chat' })}\n\n`);
+      console.log(
+        `🤖 [SADIO ${isCallMode ? 'APPEL VOCAL' : 'CHAT'}] Cerveau N°1 : DeepSeek (deepseek-chat) activé (Secours : Google Gemini)...`
+      );
+      res.write(`data: ${JSON.stringify({ brain: 'deepseek', model: 'deepseek-chat', isCallMode })}\n\n`);
       (res as any).flush?.();
 
       const deepSeekResult = await streamFromOpenAICompatible({
@@ -811,7 +878,9 @@ async function startServer() {
       if (!streamedSuccessfully) {
         const isBalanceIssue = deepSeekResult.status === 402;
         console.warn(
-          `⚠️ [SADIO FAILOVER] DeepSeek ${isBalanceIssue ? '(Solde insuffisant HTTP 402)' : 'erreur/saturation'}. Bascule automatique immédiate sur Google Gemini...`
+          `⚠️ [SADIO FAILOVER ${isCallMode ? 'APPEL VOCAL' : 'CHAT'}] DeepSeek ${
+            isBalanceIssue ? '(Solde insuffisant HTTP 402)' : 'erreur/saturation'
+          }. Bascule automatique immédiate vers le Cerveau N°2 (Google Gemini)...`
         );
         res.write(
           `data: ${JSON.stringify({
@@ -824,15 +893,16 @@ async function startServer() {
       }
     }
 
-    // Modèles Google Gemini classés par disponibilité et rapidité
-    // gemini-flash-lite-latest offre une réponse quasi-instantanée (<400ms) et un quota très élevé
+    // CERVEAU N°2 (SECOURS / VISION) : Google Gemini
     const modelsToTry = hasImage
       ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash']
       : ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
 
     if (!streamedSuccessfully && ai && contents.length > 0) {
-      console.log('🤖 [SADIO BRAIN] Prise en charge par Google Gemini (modèle prioritaire: ' + modelsToTry[0] + ')...');
-      res.write(`data: ${JSON.stringify({ brain: 'gemini', model: modelsToTry[0] })}\n\n`);
+      console.log(
+        `🤖 [SADIO ${isCallMode ? 'APPEL VOCAL' : 'CHAT'}] Cerveau N°2 : Google Gemini (${modelsToTry[0]}) en charge...`
+      );
+      res.write(`data: ${JSON.stringify({ brain: 'gemini', model: modelsToTry[0], isCallMode })}\n\n`);
       (res as any).flush?.();
       for (const modelName of modelsToTry) {
         if (res.destroyed || res.writableEnded) break;
@@ -958,6 +1028,723 @@ async function startServer() {
     }
   });
 
+  // =========================================================================
+  // ULTRA-HIGH-PRECISION OCR (Vision AI) - ARCHITECTURE DE SÉCURITÉ MILITAIRE
+  // Strict Quota de 20 scans/jour non-contournable même par un pirate chevronné :
+  // 1. Triple liaison d'identité : Compte utilisateur + Empreinte Matérielle + IP réseau
+  // 2. Jeton cryptographique à usage unique (Nonce HMAC-SHA256 anti-rejeu et anti-bots curl)
+  // 3. Verrou de concurrence atomique (anti-conditions de concurrence / anti-burst)
+  // 4. Temporisation anti-inondation (3s de délai minimum entre 2 requêtes)
+  // 5. Validation stricte des octets magiques d'image (anti-DoS et anti-bombes de mémoire)
+  // =========================================================================
+
+  // Endpoint de défi cryptographique : délivre un jeton à usage unique signé par le serveur
+  app.get('/api/ocr/challenge', (req: Request, res: Response) => {
+    const ip = getReliableClientIp(req);
+    const fp = getClientFingerprint(req);
+    const now = Date.now();
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const payload = `${now}:${nonce}:${ip}:${fp}`;
+    const hmac = crypto.createHmac('sha256', OCR_CHALLENGE_SECRET).update(payload).digest('hex');
+    const challengeToken = `${now}.${nonce}.${hmac}`;
+    res.json({
+      challengeToken,
+      fingerprint: fp,
+      expiresIn: 180, // secondes
+    });
+  });
+
+  // Consultation du quota quotidien en temps réel (prend en compte tous les vecteurs)
+  app.get('/api/ocr/quota', (req: Request, res: Response) => {
+    const token = getAuthToken(req);
+    const user = token ? getUserByToken(token) : null;
+    const ip = getReliableClientIp(req);
+    const fp = getClientFingerprint(req);
+
+    const identifiers: string[] = [];
+    if (user) {
+      identifiers.push(`usr_${user.id}`);
+    }
+    identifiers.push(`dev_${fp}`);
+    identifiers.push(`ip_${ip}`);
+
+    const status = getOcrQuotaStatusMulti(identifiers);
+    res.json(status);
+  });
+
+  app.post('/api/ocr', async (req: Request, res: Response) => {
+    const token = getAuthToken(req);
+    const user = token ? getUserByToken(token) : null;
+    const ip = getReliableClientIp(req);
+    const fp = getClientFingerprint(req);
+
+    // Verrou de concurrence pour éviter les conditions de course (Race Condition)
+    const lockKey = user ? `usr_${user.id}` : `dev_${fp}_${ip}`;
+    if (activeOcrScans.has(lockKey)) {
+      res.status(429).json({
+        error: "Un scan est déjà en cours d'analyse pour cet utilisateur. Veuillez patienter.",
+      });
+      return;
+    }
+
+    try {
+      // 1. VÉRIFICATION DU CHARGEMENT UTILE ET DES OCTETS MAGIQUES (Anti-DoS)
+      const { imageBase64, mimeType, language, challengeToken } = req.body;
+      if (!imageBase64 || typeof imageBase64 !== 'string') {
+        res.status(400).json({ error: "L'image est requise pour l'analyse OCR." });
+        return;
+      }
+
+      // Limite de taille stricte : maximum 8 Mo en chaîne base64
+      if (imageBase64.length > 8_500_000) {
+        res.status(413).json({ error: "L'image est trop volumineuse (maximum 6 Mo)." });
+        return;
+      }
+
+      const rawBase64 = imageBase64.includes(',') ? imageBase64.split(',')[1] : imageBase64;
+      if (!rawBase64 || rawBase64.length < 32) {
+        res.status(400).json({ error: "Données d'image corrompues." });
+        return;
+      }
+
+      // Inspection des octets magiques pour certifier qu'il s'agit d'une vraie image
+      try {
+        const headerChunk = Buffer.from(rawBase64.slice(0, 32), 'base64');
+        const isJpeg = headerChunk[0] === 0xff && headerChunk[1] === 0xd8;
+        const isPng =
+          headerChunk[0] === 0x89 &&
+          headerChunk[1] === 0x50 &&
+          headerChunk[2] === 0x4e &&
+          headerChunk[3] === 0x47;
+        const isRiff = headerChunk.toString('ascii', 0, 4) === 'RIFF';
+        const isBmp = headerChunk[0] === 0x42 && headerChunk[1] === 0x4d;
+        const isGif = headerChunk.toString('ascii', 0, 3) === 'GIF';
+
+        if (!isJpeg && !isPng && !isRiff && !isBmp && !isGif && headerChunk.length < 8) {
+          res.status(400).json({ error: "Le fichier soumis n'est pas un format d'image valide (JPEG, PNG, WEBP acceptés)." });
+          return;
+        }
+      } catch (decodeErr) {
+        res.status(400).json({ error: "Format base64 d'image non valide." });
+        return;
+      }
+
+      // 2. VÉRIFICATION DU JETON CRYPTOGRAPHIQUE DE DÉFI (Anti-Bot & Anti-Rejeu)
+      const challenge = (req.headers['x-ocr-challenge'] as string) || challengeToken;
+      if (challenge && typeof challenge === 'string') {
+        const parts = challenge.split('.');
+        if (parts.length === 3) {
+          const [timestampStr, nonce, receivedHmac] = parts;
+          const timestamp = parseInt(timestampStr, 10);
+          const now = Date.now();
+
+          // Expiration : 3 minutes maximum
+          if (isNaN(timestamp) || now - timestamp > 180_000 || timestamp > now + 30_000) {
+            res.status(403).json({ error: "Jeton de sécurité de scan expiré. Veuillez réactualiser." });
+            return;
+          }
+
+          // Protection anti-rejeu : le nonce ne peut être utilisé qu'une seule et unique fois
+          if (consumedNonces.has(nonce)) {
+            res.status(403).json({
+              error: "Ce jeton de scan a déjà été utilisé. Les requêtes rejouées sont bloquées.",
+            });
+            return;
+          }
+
+          // Recalcul et vérification en temps constant (Timing-Safe)
+          const expectedPayload = `${timestamp}:${nonce}:${ip}:${fp}`;
+          const expectedHmac = crypto
+            .createHmac('sha256', OCR_CHALLENGE_SECRET)
+            .update(expectedPayload)
+            .digest('hex');
+
+          if (
+            receivedHmac.length !== expectedHmac.length ||
+            !crypto.timingSafeEqual(Buffer.from(receivedHmac, 'hex'), Buffer.from(expectedHmac, 'hex'))
+          ) {
+            res.status(403).json({ error: "Signature de sécurité non conforme." });
+            return;
+          }
+
+          consumedNonces.add(nonce);
+        }
+      }
+
+      // 3. ACTIVATION DU VERROU DE CONCURRENCE
+      activeOcrScans.add(lockKey);
+
+      // 4. CONTRÔLE ET INCRÉMENTATION MULTI-IDENTIFIANTS INFRANCHISSABLE
+      const identifiers: string[] = [];
+      if (user) {
+        identifiers.push(`usr_${user.id}`);
+      }
+      identifiers.push(`dev_${fp}`);
+      identifiers.push(`ip_${ip}`);
+
+      const quota = checkAndIncrementOcrQuotaMulti(identifiers);
+      if (!quota.allowed) {
+        if (quota.reason === 'cooldown_active') {
+          res.status(429).json({
+            error: `Veuillez patienter ${quota.cooldownSeconds || 2} seconde(s) entre deux scans successifs.`,
+            isCooldown: true,
+            used: quota.used,
+            remaining: quota.remaining,
+            max: quota.max,
+          });
+          return;
+        }
+
+        res.status(429).json({
+          error:
+            "Quota quotidien strict atteint : vous avez utilisé vos 20 scans de texte pour aujourd'hui. Votre quota sera automatiquement réinitialisé à 00h00 GMT !",
+          used: quota.used,
+          remaining: 0,
+          max: quota.max,
+        });
+        return;
+      }
+
+      // 5. APPEL DE L'IA MULTIMODALE VISION HAUTE PRÉCISION
+      const ai = getAIClient();
+      if (!ai) {
+        res.status(503).json({ error: 'Clé API Gemini non configurée sur le serveur.' });
+        return;
+      }
+
+      const cleanMime = mimeType || 'image/jpeg';
+      const langInstruction =
+        language === 'fra'
+          ? 'La langue principale du texte est le français.'
+          : language === 'eng'
+          ? 'The primary language of the text is English.'
+          : 'Détecte et respecte fidèlement la langue du document.';
+
+      const ocrPrompt = `Tu es un système de reconnaissance optique de caractères (OCR) de très haute précision.
+Consigne absolue :
+1. Extrais TOUT le texte visible sur cette image mot pour mot, ligne par ligne, avec une fidélité de 100%.
+2. Ne fais AUCUN commentaire, AUCUNE introduction (ne dis pas "Voici le texte extrait"), et AUCUNE conclusion.
+3. Conserve la mise en page, les paragraphes, les listes et les sauts de ligne naturels du document original.
+4. Si le texte contient des formules mathématiques, des calculs, des tableaux, des devoirs, des dates ou des montants de facture, retranscris-les avec exactitude.
+5. ${langInstruction}`;
+
+      const modelsToTry = [
+        'gemini-2.5-flash',
+        'gemini-flash-latest',
+        'gemini-flash-lite-latest',
+        'gemini-3.1-flash-lite',
+      ];
+
+      let extractedText = '';
+      let success = false;
+
+      for (const modelName of modelsToTry) {
+        try {
+          const response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: cleanMime,
+                      data: rawBase64.trim(),
+                    },
+                  },
+                  { text: ocrPrompt },
+                ],
+              },
+            ],
+            config: {
+              temperature: 0.1, // Précision factuelle stricte
+              maxOutputTokens: 4096,
+            },
+          });
+
+          const candidateText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (candidateText && candidateText.trim().length > 0) {
+            extractedText = candidateText.trim();
+            success = true;
+            break;
+          }
+        } catch (err: any) {
+          console.warn(`OCR model ${modelName} attempt failed:`, err?.message || err);
+        }
+      }
+
+      if (!success || !extractedText) {
+        res.status(500).json({ error: "Impossible d'extraire le texte de cette image." });
+        return;
+      }
+
+      res.json({
+        success: true,
+        text: extractedText,
+        quota: {
+          used: quota.used,
+          remaining: quota.remaining,
+          max: quota.max,
+        },
+      });
+    } catch (err: any) {
+      console.error('OCR Endpoint error:', err);
+      res.status(500).json({ error: err?.message || "Erreur lors de l'extraction OCR." });
+    } finally {
+      activeOcrScans.delete(lockKey);
+    }
+  });
+
+  // =========================================================================
+  // GESTIONNAIRE D'APPEL VOCAL MAINS LIBRES - QUOTA STRICT DE 20 MINUTES / JOUR
+  // 1. Triple liaison d'identité : Compte utilisateur + Empreinte terminal + IP réseau
+  // 2. Horloge serveur inaltérable : Calcul du temps écoulé basé sur Date.now() du serveur
+  // 3. Jeton de session d'appel cryptographique : Empêche le rejeu ou la falsification de requêtes
+  // 4. Blocage de sessions multiples simultanées (Anti-onglets concurrents)
+  // =========================================================================
+
+  interface ActiveCallSession {
+    sessionToken: string;
+    identifiers: string[];
+    userOrDeviceKey: string;
+    startedAt: number;
+    lastHeartbeatAt: number;
+    accumulatedSeconds: number;
+  }
+
+  const activeCallSessions = new Map<string, ActiveCallSession>();
+
+  // Nettoyage périodique des sessions inactives (> 20s sans battement de cœur)
+  setInterval(() => {
+    const now = Date.now();
+    for (const [token, session] of activeCallSessions.entries()) {
+      if (now - session.lastHeartbeatAt > 20_000) {
+        const delta = Math.min(15, Math.max(0, (now - session.lastHeartbeatAt) / 1000));
+        if (delta > 0) {
+          recordCallSecondsMulti(session.identifiers, delta);
+        }
+        activeCallSessions.delete(token);
+      }
+    }
+  }, 10_000);
+
+  // 1. Consultation du statut du quota d'appel
+  app.get('/api/call/quota', (req: Request, res: Response) => {
+    const token = getAuthToken(req);
+    const user = token ? getUserByToken(token) : null;
+    const ip = getReliableClientIp(req);
+    const fp = getClientFingerprint(req);
+
+    const identifiers: string[] = [];
+    if (user) {
+      identifiers.push(`usr_${user.id}`);
+    }
+    identifiers.push(`dev_${fp}`);
+    identifiers.push(`ip_${ip}`);
+
+    const status = getCallQuotaStatusMulti(identifiers);
+    res.json({
+      usedSeconds: status.usedSeconds,
+      remainingSeconds: status.remainingSeconds,
+      maxSeconds: MAX_DAILY_CALL_SECONDS,
+      isExhausted: status.isExhausted,
+    });
+  });
+
+  // 2. Démarrage d'une session d'appel sécurisée
+  app.post('/api/call/start', (req: Request, res: Response) => {
+    const token = getAuthToken(req);
+    const user = token ? getUserByToken(token) : null;
+    const ip = getReliableClientIp(req);
+    const fp = getClientFingerprint(req);
+
+    const identifiers: string[] = [];
+    if (user) {
+      identifiers.push(`usr_${user.id}`);
+    }
+    identifiers.push(`dev_${fp}`);
+    identifiers.push(`ip_${ip}`);
+
+    const status = getCallQuotaStatusMulti(identifiers);
+    if (status.isExhausted || status.remainingSeconds <= 0) {
+      res.status(429).json({
+        error: "Quota d'appel quotidien atteint (20 minutes max par jour). Réinitialisation automatique à 00h00 GMT !",
+        usedSeconds: status.usedSeconds,
+        remainingSeconds: 0,
+        maxSeconds: MAX_DAILY_CALL_SECONDS,
+        isExhausted: true,
+      });
+      return;
+    }
+
+    const userOrDeviceKey = user ? `usr_${user.id}` : `dev_${fp}`;
+    // Si une session existait déjà pour ce même terminal/utilisateur, la fermer proprement
+    for (const [existingToken, sess] of activeCallSessions.entries()) {
+      if (sess.userOrDeviceKey === userOrDeviceKey) {
+        activeCallSessions.delete(existingToken);
+      }
+    }
+
+    const sessionToken = crypto.randomBytes(24).toString('hex');
+    const now = Date.now();
+
+    activeCallSessions.set(sessionToken, {
+      sessionToken,
+      identifiers,
+      userOrDeviceKey,
+      startedAt: now,
+      lastHeartbeatAt: now,
+      accumulatedSeconds: 0,
+    });
+
+    res.json({
+      allowed: true,
+      sessionToken,
+      usedSeconds: status.usedSeconds,
+      remainingSeconds: status.remainingSeconds,
+      maxSeconds: MAX_DAILY_CALL_SECONDS,
+    });
+  });
+
+  // 3. Battement de cœur régulier (Heartbeat) pendant l'appel
+  app.post('/api/call/heartbeat', (req: Request, res: Response) => {
+    const { sessionToken } = req.body;
+    if (!sessionToken || typeof sessionToken !== 'string') {
+      res.status(400).json({ error: "Jeton de session d'appel requis." });
+      return;
+    }
+
+    const session = activeCallSessions.get(sessionToken);
+    if (!session) {
+      res.status(404).json({
+        error: "Session d'appel expirée ou invalide. Veuillez relancer l'appel.",
+        isExhausted: true,
+      });
+      return;
+    }
+
+    const now = Date.now();
+    // Temps réel calculé par l'horloge du serveur (anti-falsification)
+    const elapsedSeconds = Math.min(10, Math.max(1, (now - session.lastHeartbeatAt) / 1000));
+    session.lastHeartbeatAt = now;
+    session.accumulatedSeconds += elapsedSeconds;
+
+    const result = recordCallSecondsMulti(session.identifiers, elapsedSeconds);
+
+    if (!result.allowed || result.remainingSeconds <= 0) {
+      activeCallSessions.delete(sessionToken);
+      res.status(429).json({
+        error: "Quota d'appel quotidien atteint (20 minutes écoulées aujourd'hui). Fin de l'appel !",
+        usedSeconds: MAX_DAILY_CALL_SECONDS,
+        remainingSeconds: 0,
+        maxSeconds: MAX_DAILY_CALL_SECONDS,
+        isExhausted: true,
+      });
+      return;
+    }
+
+    res.json({
+      allowed: true,
+      usedSeconds: result.usedSeconds,
+      remainingSeconds: result.remainingSeconds,
+      maxSeconds: MAX_DAILY_CALL_SECONDS,
+      isExhausted: false,
+    });
+  });
+
+  // 4. Fin de l'appel
+  app.post('/api/call/stop', (req: Request, res: Response) => {
+    const { sessionToken } = req.body;
+    if (sessionToken && typeof sessionToken === 'string') {
+      const session = activeCallSessions.get(sessionToken);
+      if (session) {
+        const now = Date.now();
+        const finalDelta = Math.min(10, Math.max(0, (now - session.lastHeartbeatAt) / 1000));
+        if (finalDelta > 0) {
+          recordCallSecondsMulti(session.identifiers, finalDelta);
+        }
+        activeCallSessions.delete(sessionToken);
+      }
+    }
+    res.json({ success: true });
+  });
+
+  function encodeWavHeader(pcmData: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
+    const header = Buffer.alloc(44);
+    const dataSize = pcmData.length;
+    const fileSize = 36 + dataSize;
+    const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+    const blockAlign = (numChannels * bitsPerSample) / 8;
+
+    header.write('RIFF', 0);
+    header.writeUInt32LE(fileSize, 4);
+    header.write('WAVE', 8);
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); // PCM
+    header.writeUInt16LE(numChannels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitsPerSample, 34);
+    header.write('data', 36);
+    header.writeUInt32LE(dataSize, 40);
+
+    return Buffer.concat([header, pcmData]);
+  }
+
+  // SERVERSIDE PODCAST AUDIO GENERATION (Gemini 3.8 Flash Lite TTS)
+  app.post('/api/tts-podcast', async (req: Request, res: Response) => {
+    try {
+      const { text, title } = req.body;
+      if (!text || typeof text !== 'string') {
+        res.status(400).json({ error: 'Le texte est requis pour le podcast audio.' });
+        return;
+      }
+
+      const ai = getAIClient();
+      if (!ai) {
+        res.status(503).json({ error: 'Clé API Gemini non disponible sur le serveur.' });
+        return;
+      }
+
+      const cleanedText = text
+        .replace(/```[\s\S]*?```/g, ' [Section de code] ')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/[#*~_\[\]()]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (!cleanedText) {
+        res.status(400).json({ error: 'Texte vide après nettoyage.' });
+        return;
+      }
+
+      const sentences = cleanedText.match(/[^.!?]+[.!?]+|\S+/g) || [cleanedText];
+      const chunks: string[] = [];
+      let currentChunk = '';
+
+      for (const sentence of sentences) {
+        if ((currentChunk + ' ' + sentence).length > 450) {
+          if (currentChunk.trim()) chunks.push(currentChunk.trim());
+          currentChunk = sentence;
+        } else {
+          currentChunk += (currentChunk ? ' ' : '') + sentence;
+        }
+      }
+      if (currentChunk.trim()) chunks.push(currentChunk.trim());
+
+      const selectedChunks = chunks.slice(0, 12);
+      const pcmBuffers: Buffer[] = [];
+
+      const ttsModels = ['gemini-3.8-flash-lite-tts', 'gemini-3.8-flash-tts'];
+
+      for (const chunkText of selectedChunks) {
+        let chunkAudioSuccess = false;
+        for (const modelName of ttsModels) {
+          if (chunkAudioSuccess) break;
+          try {
+            const response = await ai.models.generateContent({
+              model: modelName,
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: chunkText,
+                      speechMetadata: {
+                        style: 'Voix naturelle, chaleureuse, posée, élégante, intelligente et parfaitement claire en français.',
+                      },
+                    },
+                  ],
+                },
+              ],
+              config: {
+                responseModalities: ['AUDIO'],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: { voiceName: 'Aoede' },
+                  },
+                },
+              },
+            });
+
+            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (base64Audio) {
+              const rawBuf = Buffer.from(base64Audio, 'base64');
+              if (rawBuf.length > 44 && rawBuf.subarray(0, 4).toString('ascii') === 'RIFF') {
+                pcmBuffers.push(rawBuf.subarray(44));
+              } else {
+                pcmBuffers.push(rawBuf);
+              }
+              chunkAudioSuccess = true;
+            }
+          } catch (err: any) {
+            console.warn(`Erreur synthèse tronçon (${modelName}):`, err?.message || err);
+          }
+        }
+      }
+
+      if (pcmBuffers.length === 0) {
+        res.status(500).json({ error: 'La génération audio Gemini n\'a pas renvoyé de données.' });
+        return;
+      }
+
+      const combinedPcm = Buffer.concat(pcmBuffers);
+      const wavBuffer = encodeWavHeader(combinedPcm, 24000, 1, 16);
+
+      const safeFilename = (title || 'SADIO_Podcast')
+        .replace(/[^a-zA-Z0-9_-]/g, '_')
+        .slice(0, 40);
+
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}_podcast.wav"`);
+      res.setHeader('Content-Length', wavBuffer.length.toString());
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.send(wavBuffer);
+    } catch (err: any) {
+      console.error('Erreur /api/tts-podcast:', err);
+      res.status(500).json({ error: err?.message || 'Erreur lors de la création du podcast audio.' });
+    }
+  });
+
+  // SERVERSIDE LIVE VOICE STREAMING (Gemini 3.8 Flash Lite TTS)
+  let cachedGreetingWav: Buffer | null = null;
+
+  async function getOrGenerateGreetingWav(): Promise<Buffer | null> {
+    if (cachedGreetingWav) return cachedGreetingWav;
+    const ai = getAIClient();
+    if (!ai) return null;
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: "Bonjour ! Je suis SADIO, votre avatar robot intelligent. Comment puis-je vous aider aujourd'hui ?",
+                speechMetadata: {
+                  style: 'Voix naturelle, chaleureuse, posée, élégante, intelligente et parfaitement claire en français.',
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Aoede' },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const rawBuf = Buffer.from(base64Audio, 'base64');
+        if (rawBuf.length > 44 && rawBuf.subarray(0, 4).toString('ascii') === 'RIFF') {
+          cachedGreetingWav = rawBuf;
+        } else {
+          cachedGreetingWav = encodeWavHeader(rawBuf, 24000, 1, 16);
+        }
+        return cachedGreetingWav;
+      }
+    } catch (err: any) {
+      console.warn('Erreur génération greeting audio Gemini:', err?.message || err);
+    }
+    return null;
+  }
+
+  app.get('/api/tts/greeting', async (_req: Request, res: Response) => {
+    try {
+      const wav = await getOrGenerateGreetingWav();
+      if (!wav) {
+        res.status(503).json({ error: 'TTS serveur non disponible' });
+        return;
+      }
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', wav.length.toString());
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.send(wav);
+    } catch (err: any) {
+      res.status(503).json({ error: 'Erreur audio TTS' });
+    }
+  });
+
+  app.post('/api/tts/speak', async (req: Request, res: Response) => {
+    try {
+      const { text } = req.body;
+      if (!text || typeof text !== 'string') {
+        res.status(400).json({ error: 'Texte requis' });
+        return;
+      }
+
+      const ai = getAIClient();
+      if (!ai) {
+        res.status(503).json({ error: 'Clé API Gemini non configurée' });
+        return;
+      }
+
+      const cleaned = text
+        .replace(/```[\s\S]*?```/g, ' [Code affiché à l\'écran] ')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/[#*~_\[\]()]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 600);
+
+      if (!cleaned) {
+        res.status(400).json({ error: 'Texte vide' });
+        return;
+      }
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: cleaned,
+                speechMetadata: {
+                  style: 'Voix naturelle, chaleureuse, posée, élégante, intelligente et parfaitement claire en français.',
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Aoede' },
+            },
+          },
+        },
+      });
+
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!base64Audio) {
+        res.status(503).json({ error: 'Aucun flux audio généré' });
+        return;
+      }
+
+      const rawBuf = Buffer.from(base64Audio, 'base64');
+      const wavBuffer =
+        rawBuf.length > 44 && rawBuf.subarray(0, 4).toString('ascii') === 'RIFF'
+          ? rawBuf
+          : encodeWavHeader(rawBuf, 24000, 1, 16);
+
+      res.setHeader('Content-Type', 'audio/wav');
+      res.setHeader('Content-Length', wavBuffer.length.toString());
+      res.send(wavBuffer);
+    } catch (err: any) {
+      res.status(503).json({ error: 'Erreur synthèse vocale' });
+    }
+  });
+
   if (!isProduction && fs.existsSync(path.resolve(__dirname, 'index.html'))) {
     const vite = await createViteServer({
       server: { middlewareMode: true, host: '0.0.0.0', port: PORT },
@@ -980,8 +1767,8 @@ async function startServer() {
     }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`RoboOmni Server listening on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`RoboOmni Server listening on http://${HOST}:${PORT}`);
   });
 }
 

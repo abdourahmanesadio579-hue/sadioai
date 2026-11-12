@@ -32,7 +32,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   onStopSpeak,
   isSpeakingThis = false,
   isStreaming = false,
-  hideResponseText = true,
+  hideResponseText = false,
 }) => {
   const isBot = message.role === 'model';
   const isErrorMessage = message.domain === 'Erreur' || message.id.startsWith('bot-err-');

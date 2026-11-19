@@ -56,9 +56,6 @@ Je suis **SADIO**, votre avatar robot intelligent. Je me tiens debout au centre 
 Posez votre question ci-dessous ou cliquez sur le micro pour me parler directement !`,
     },
     input: {
-      handsFree: 'Mode Appel Mains Libres',
-      ocr: 'Scanner Texte (OCR)',
-      math: 'Maths & Graphiques',
       placeholderNormal: 'Posez votre question à SADIO (vocal ou texte)...',
       placeholderImage: "Question sur l'image ou [Entrée] pour analyse complète...",
       send: 'Envoyer la question',
@@ -67,8 +64,6 @@ Posez votre question ci-dessous ou cliquez sur le micro pour me parler directeme
       stopMic: 'Arrêter la dictée vocale',
       imageReady: 'Image prête • Vision Haute Précision',
       removeImage: 'Retirer cette image',
-      callQuotaExhausted: "Quota d'appel de 20 min atteint pour aujourd'hui",
-      launchCall: 'Lancer le Mode Appel Mains Libres',
     },
     response: {
       listening: 'En écoute...',
@@ -138,9 +133,6 @@ I am **SADIO**, your intelligent cognitive robot avatar. Standing at the center 
 Ask your question below or click the microphone to speak with me directly!`,
     },
     input: {
-      handsFree: 'Hands-Free Voice Call',
-      ocr: 'Text Scanner (OCR)',
-      math: 'Math & Graphs',
       placeholderNormal: 'Ask SADIO a question (voice or text)...',
       placeholderImage: 'Question about the image or [Enter] for complete analysis...',
       send: 'Send question',
@@ -149,8 +141,6 @@ Ask your question below or click the microphone to speak with me directly!`,
       stopMic: 'Stop voice dictation',
       imageReady: 'Image ready • High Precision Vision',
       removeImage: 'Remove this image',
-      callQuotaExhausted: 'Daily 20 min voice call quota reached',
-      launchCall: 'Start Hands-Free Voice Call',
     },
     response: {
       listening: 'Listening...',

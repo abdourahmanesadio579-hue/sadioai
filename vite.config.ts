@@ -93,9 +93,10 @@ export default defineConfig(() => {
             },
             {
               urlPattern: /\.(?:js|css)$/i,
-              handler: 'StaleWhileRevalidate',
+              handler: 'NetworkFirst',
               options: {
                 cacheName: 'static-resources-cache',
+                networkTimeoutSeconds: 3,
                 expiration: {
                   maxEntries: 50,
                   maxAgeSeconds: 60 * 60 * 24 * 7, // 7 jours
@@ -108,7 +109,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),

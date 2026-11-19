@@ -1,8 +1,7 @@
 import React from 'react';
 import { RobotTheme, ChatMessage } from '../types/chat';
-import { X, Palette, Volume2, Trash2, ShieldCheck, Play, Check, RotateCcw, Sparkles, Cpu, Download, Phone, Globe } from 'lucide-react';
+import { X, Palette, Volume2, Trash2, ShieldCheck, Play, Check, RotateCcw, Sparkles, Cpu, Download, Globe } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
-import { MAX_DAILY_CALL_SECONDS, formatCallTime } from '../utils/callQuota';
 import { Language, TRANSLATIONS } from '../utils/i18n';
 
 interface SettingsModalProps {
@@ -17,7 +16,6 @@ interface SettingsModalProps {
   onChangeSpeechRate?: (rate: number) => void;
   messages: ChatMessage[];
   onClearMessages: () => void;
-  usedCallSeconds?: number;
   voiceEnabled?: boolean;
   onToggleVoice?: () => void;
   onTestVoice?: () => void;
@@ -37,7 +35,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   speechRate = 1.0,
   onChangeSpeechRate,
   onClearMessages,
-  usedCallSeconds = 0,
   voiceEnabled = true,
   onToggleVoice,
   onTestVoice,
@@ -248,16 +245,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-400"
                     >
                       {voicesToDisplay.map((voice) => {
-                        const isGoogle = voice.name.toLowerCase().includes('google');
+                        const isLocal = voice.localService;
                         const isEnhanced =
                           voice.name.toLowerCase().includes('enhanced') ||
                           voice.name.toLowerCase().includes('natural') ||
-                          voice.name.toLowerCase().includes('network') ||
                           voice.name.toLowerCase().includes('neural');
-                        const badge = isGoogle ? '⭐ ' : isEnhanced ? '✨ ' : '';
+                        const badge = isLocal ? '⚡ ' : isEnhanced ? '✨ ' : '';
+                        const suffix = isLocal ? 'Locale • Rapide' : 'Réseau';
                         return (
                           <option key={voice.name} value={voice.name}>
-                            {badge}{voice.name} ({voice.lang})
+                            {badge}{voice.name} ({voice.lang} • {suffix})
                           </option>
                         );
                       })}
@@ -381,31 +378,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <li><strong className="text-slate-200">Précision totale</strong> : Transcription OCR fidèle, description détaillée des scènes et diagnostics.</li>
               <li><strong className="text-slate-200">Économique</strong> : Tarif ultra-accessible (~0,10 $ / 1M tokens) permettant des milliers d'analyses d'images à coût minime.</li>
             </ul>
-          </div>
-
-          {/* Quota d'Appel Mains Libres Quotidien */}
-          <div className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Phone className="w-4 h-4 text-emerald-400" />
-                <span className="text-xs font-semibold text-slate-200">Quota d'Appel Vocal (20 min/jour)</span>
-              </div>
-              <span className="text-[11px] font-mono font-bold text-emerald-300">
-                {formatCallTime(Math.max(0, MAX_DAILY_CALL_SECONDS - (usedCallSeconds || 0)))} restant
-              </span>
-            </div>
-            <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-              <div
-                className="bg-emerald-400 h-full rounded-full transition-all"
-                style={{
-                  width: `${Math.min(100, (((usedCallSeconds || 0)) / MAX_DAILY_CALL_SECONDS) * 100)}%`,
-                }}
-              />
-            </div>
-            <div className="flex items-center justify-between text-[10px] text-slate-400">
-              <span>Consommé aujourd'hui : {formatCallTime(usedCallSeconds || 0)} / 20:00</span>
-              <span className="text-slate-500 font-mono">Reset auto à 00h00 GMT</span>
-            </div>
           </div>
 
           {/* Action: PWA Install */}

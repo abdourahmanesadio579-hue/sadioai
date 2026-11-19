@@ -61,11 +61,23 @@
       </div>
     </div>
     <script>
-      // Clear any broken cached service workers from older builds on mobile
+      // Unregister stale dev service workers and clear old caches so code updates take effect immediately
       if ('serviceWorker' in navigator) {
         navigator.serviceWorker.getRegistrations().then(function(regs) {
           for (var i = 0; i < regs.length; i++) {
-            regs[i].update();
+            var swUrl = (regs[i].active && regs[i].active.scriptURL) || (regs[i].waiting && regs[i].waiting.scriptURL) || '';
+            if (swUrl.indexOf('dev-sw.js') !== -1) {
+              regs[i].unregister();
+              if ('caches' in window) {
+                caches.keys().then(function(keys) {
+                  for (var k = 0; k < keys.length; k++) {
+                    caches.delete(keys[k]);
+                  }
+                });
+              }
+            } else {
+              regs[i].update();
+            }
           }
         });
       }

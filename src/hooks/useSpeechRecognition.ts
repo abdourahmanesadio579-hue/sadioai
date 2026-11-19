@@ -16,6 +16,8 @@ export function useSpeechRecognition({
   const [isListening, setIsListening] = useState(false);
   const [isSupported, setIsSupported] = useState(false);
   const recognitionRef = useRef<any>(null);
+  const langRef = useRef<string>(lang);
+  langRef.current = lang;
 
   useEffect(() => {
     const win = window as unknown as IWindow;
@@ -27,7 +29,7 @@ export function useSpeechRecognition({
         const recognition = new SpeechRecognitionClass();
         recognition.continuous = false;
         recognition.interimResults = false;
-        recognition.lang = lang;
+        recognition.lang = langRef.current;
 
         recognition.onresult = (event: any) => {
           const transcript = event.results?.[0]?.[0]?.transcript;
@@ -53,9 +55,16 @@ export function useSpeechRecognition({
     }
   }, [onResult]);
 
+  useEffect(() => {
+    if (recognitionRef.current) {
+      recognitionRef.current.lang = lang;
+    }
+  }, [lang]);
+
   const startListening = useCallback(() => {
     if (recognitionRef.current && !isListening) {
       try {
+        recognitionRef.current.lang = langRef.current;
         recognitionRef.current.start();
         setIsListening(true);
       } catch (err) {

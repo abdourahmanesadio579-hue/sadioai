@@ -8,7 +8,7 @@ import { SubscriptionModal } from './components/SubscriptionModal';
 import { DOMAINS } from './data/domains';
 import { ChatMessage, DomainCategory, RobotState, RobotTheme } from './types/chat';
 import { UserProfile, AccessStatus } from './types/auth';
-import { useSpeechSynthesis, cleanTextForSpeech } from './hooks/useSpeechSynthesis';
+import { useSpeechSynthesis, cleanTextForSpeech, splitIntoSentences } from './hooks/useSpeechSynthesis';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { safeStorage } from './utils/storage';
 import {
@@ -27,26 +27,12 @@ import {
   Image as ImageIcon,
   FileText,
   Radio,
-  Phone,
   Download,
-  ScanText,
-  LineChart,
-  Calculator,
 } from 'lucide-react';
 import { processImageFile, formatFileSize, ProcessedImage } from './utils/imageCompressor';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { KaraokeReaderModal } from './components/KaraokeReaderModal';
-import { HandsFreeCallModal } from './components/HandsFreeCallModal';
-import { OcrScannerModal } from './components/OcrScannerModal';
-import { MathSolverModal } from './components/MathSolverModal';
 import { exportTextAsAudioPodcast } from './utils/audioPodcastExporter';
-import {
-  getStoredCallQuota,
-  saveStoredCallQuota,
-  fetchServerCallQuota,
-  MAX_DAILY_CALL_SECONDS,
-  formatCallTime,
-} from './utils/callQuota';
 import {
   Language,
   getStoredLanguage,
@@ -57,8 +43,203 @@ import {
 const THEME_KEY = 'robo_omni_theme_v2';
 const HIDE_TEXT_KEY = 'robo_omni_hide_response_text_v1';
 
+const SPEECH_ABBREVIATIONS = new Set([
+  'm', 'mme', 'mlle', 'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr',
+  'etc', 'cf', 'ex', 'fig', 'vol', 'art', 'ch', 'p', 'pp', 'st', 'ste',
+  'av', 'bd', 'env', 'approx', 'vs', 'inc', 'ltd', 'co',
+]);
+
+const DANGLING_WORDS = new Set([
+  'à', 'de', 'du', 'des', 'le', 'la', 'les', 'un', 'une', 'en', 'au', 'aux',
+  'et', 'ou', 'qui', 'que', 'pour', 'dans', 'sur', 'avec', 'par', 'sans', 'chez',
+  'to', 'the', 'a', 'an', 'in', 'on', 'at', 'of', 'for', 'and', 'or', 'with', 'by',
+]);
+
+function extractNextSpeechChunk(
+  unparsed: string,
+  isFirstChunk: boolean,
+  speechCaughtUp: boolean,
+  inFlightCount: number
+): { rawChunk: string; consumedLength: number; isHardFallback: boolean } | null {
+  if (!unparsed || unparsed.length < 12) return null;
+
+  const searchLimit = Math.min(unparsed.length, 340);
+  const boundaries: number[] = [];
+
+  for (let i = 0; i < searchLimit; i++) {
+    const ch = unparsed[i];
+
+    // Paragraph break (\n\n+)
+    if (ch === '\n' && unparsed[i + 1] === '\n') {
+      let endIdx = i + 2;
+      while (endIdx < unparsed.length && /\s/.test(unparsed[endIdx])) {
+        endIdx++;
+      }
+      if (i >= 15) {
+        boundaries.push(endIdx);
+      }
+      i = endIdx - 1;
+      continue;
+    }
+
+    if (ch === '.' || ch === '!' || ch === '?' || ch === '…') {
+      let endPunct = i;
+      while (
+        endPunct + 1 < unparsed.length &&
+        (unparsed[endPunct + 1] === '.' ||
+          unparsed[endPunct + 1] === '!' ||
+          unparsed[endPunct + 1] === '?' ||
+          unparsed[endPunct + 1] === '…')
+      ) {
+        endPunct++;
+      }
+
+      // Skip decimals like 3.14
+      if (
+        ch === '.' &&
+        i > 0 &&
+        /\d/.test(unparsed[i - 1]) &&
+        endPunct + 1 < unparsed.length &&
+        /\d/.test(unparsed[endPunct + 1])
+      ) {
+        i = endPunct;
+        continue;
+      }
+
+      // Advance past optional closing quotes/parens
+      let afterPunct = endPunct + 1;
+      while (afterPunct < unparsed.length && /["'»”’)\]]/.test(unparsed[afterPunct])) {
+        afterPunct++;
+      }
+
+      // Require trailing whitespace so we never cut mid-token or mid-ellipsis while streaming
+      if (afterPunct >= unparsed.length || !/\s/.test(unparsed[afterPunct])) {
+        i = endPunct;
+        continue;
+      }
+
+      const preceding = unparsed.slice(0, i).trim();
+
+      // Skip list prefixes like "1." or "2." at start of line/chunk
+      if (ch === '.' && /(?:^|\n)\s*\d{1,3}$/.test(preceding)) {
+        i = endPunct;
+        continue;
+      }
+
+      // Skip known abbreviations like "M.", "Dr.", "etc."
+      if (ch === '.' && endPunct === i) {
+        const wordMatch = preceding.match(/([A-Za-zÀ-ÿ]+)$/);
+        if (wordMatch && SPEECH_ABBREVIATIONS.has(wordMatch[1].toLowerCase())) {
+          continue;
+        }
+      }
+
+      let consumed = afterPunct;
+      while (consumed < unparsed.length && /\s/.test(unparsed[consumed])) {
+        consumed++;
+      }
+
+      // Wait before splitting an ellipsis ("...") if the next word hasn't arrived yet so we can detect lowercase continuations
+      const isEllipsis = endPunct > i || ch === '…';
+      const nextChar = unparsed[consumed] || '';
+      if (isEllipsis && !nextChar) {
+        i = endPunct;
+        continue;
+      }
+      // If punctuation is followed by a lowercase word, do NOT split mid-sentence ("Awa va à... l'école")
+      if (nextChar && /[a-zà-öø-ÿ]/.test(nextChar)) {
+        i = endPunct;
+        continue;
+      }
+
+      if (afterPunct >= 12) {
+        boundaries.push(consumed);
+      }
+      i = endPunct;
+    }
+  }
+
+  if (boundaries.length > 0) {
+    // 1. Very first sentence: emit immediately at boundaries[0] for 0ms startup latency
+    if (isFirstChunk) {
+      const cut = boundaries[0];
+      return { rawChunk: unparsed.slice(0, cut), consumedLength: cut, isHardFallback: false };
+    }
+
+    // Group as many complete sentences as fit cleanly under 220 chars
+    let bestCut = boundaries[0];
+    for (const b of boundaries) {
+      if (b <= 220) {
+        bestCut = b;
+      } else {
+        break;
+      }
+    }
+
+    // 2. If playback caught up or nothing is currently playing/queued, flush immediately
+    if (speechCaughtUp || inFlightCount === 0) {
+      return {
+        rawChunk: unparsed.slice(0, bestCut),
+        consumedLength: bestCut,
+        isHardFallback: false,
+      };
+    }
+
+    // 3. While audio is actively speaking, batch consecutive short sentences into ~150-220 char passages
+    // so the browser TTS engine reads across periods seamlessly with zero inter-sentence pauses.
+    if (bestCut < 150 && unparsed.length < 210) {
+      return null;
+    }
+
+    return {
+      rawChunk: unparsed.slice(0, bestCut),
+      consumedLength: bestCut,
+      isHardFallback: false,
+    };
+  }
+
+  // Only if a giant unpunctuated run-on exceeds 420 chars with ZERO sentence punctuation:
+  // break at a safe clause boundary (never after 'à', 'de', "l'", etc.) and NEVER add a fake period.
+  if (unparsed.length > 420) {
+    for (let idx = 380; idx >= 180; idx--) {
+      const ch = unparsed[idx];
+      const nextCh = unparsed[idx + 1];
+      if ((ch === ';' || ch === ':' || ch === ',' || ch === '\n') && (!nextCh || /\s/.test(nextCh))) {
+        const left = unparsed.slice(0, idx).trim();
+        const lastWord = (left.match(/([A-Za-zÀ-ÿ'’]+)$/)?.[1] || '').toLowerCase();
+        if (!DANGLING_WORDS.has(lastWord) && !/['’]$/.test(left)) {
+          let consumed = idx + 1;
+          while (consumed < unparsed.length && /\s/.test(unparsed[consumed])) {
+            consumed++;
+          }
+          return { rawChunk: unparsed.slice(0, idx + 1), consumedLength: consumed, isHardFallback: true };
+        }
+      }
+    }
+
+    // Extreme fallback: safe word boundary where left side doesn't end in dangling word/apostrophe
+    for (let idx = 360; idx >= 180; idx--) {
+      if (/\s/.test(unparsed[idx])) {
+        const left = unparsed.slice(0, idx).trim();
+        const lastWord = (left.match(/([A-Za-zÀ-ÿ'’]+)$/)?.[1] || '').toLowerCase();
+        if (left.length >= 40 && !DANGLING_WORDS.has(lastWord) && !/['’]$/.test(left)) {
+          let consumed = idx + 1;
+          while (consumed < unparsed.length && /\s/.test(unparsed[consumed])) {
+            consumed++;
+          }
+          return { rawChunk: left, consumedLength: consumed, isHardFallback: true };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => getStoredLanguage());
+  const languageRef = useRef<Language>(language);
+  languageRef.current = language;
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const initialLang = getStoredLanguage();
@@ -134,32 +315,6 @@ export default function App() {
 
   // Proposition 2: Bandeau de Sous-titres Cybernétiques (Style Cinéma / HUD)
   const [showFullTextModal, setShowFullTextModal] = useState<boolean>(false);
-  const [isOcrModalOpen, setIsOcrModalOpen] = useState<boolean>(false);
-
-  // Résolveur Étape par Étape & Traceur Graphique (100% 0 F)
-  const [isMathModalOpen, setIsMathModalOpen] = useState<boolean>(false);
-  const [mathEquationToSolve, setMathEquationToSolve] = useState<string>('2x² - 4x - 6 = 0');
-
-  // Mode Appel Mains Libres (Quota quotidien cumulatif strict côté serveur : 20 min = 1200s)
-  const [isCallModalOpen, setIsCallModalOpen] = useState<boolean>(false);
-  const [usedCallSeconds, setUsedCallSeconds] = useState<number>(() => {
-    return getStoredCallQuota().usedSeconds;
-  });
-
-  // Synchronisation stricte du quota d'appel avec le serveur au montage et à l'ouverture de l'appel
-  useEffect(() => {
-    fetchServerCallQuota().then((quota) => {
-      setUsedCallSeconds(quota.usedSeconds);
-    });
-  }, [isCallModalOpen]);
-
-  const remainingCallSeconds = Math.max(0, MAX_DAILY_CALL_SECONDS - usedCallSeconds);
-  const isCallQuotaExhausted = remainingCallSeconds <= 0;
-
-  const handleTickUsedCallSeconds = useCallback((newTotal: number) => {
-    setUsedCallSeconds(newTotal);
-    saveStoredCallQuota(newTotal);
-  }, []);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -283,6 +438,8 @@ export default function App() {
     voiceEnabled,
     setVoiceEnabled,
     isSpeaking,
+    isPlayingRef: isSpeechPlayingRef,
+    inFlightCountRef,
     isVoicing,
     mouthOpenLevel,
     isPaused,
@@ -318,63 +475,81 @@ export default function App() {
   });
 
   const handleLanguageChange = useCallback((newLang: Language) => {
+    languageRef.current = newLang;
     setLanguage(newLang);
     saveStoredLanguage(newLang);
-    // If user is on initial welcome screen, automatically switch the welcome message language
-    setMessages((prev) => {
-      if (prev.length === 1 && prev[0].id === 'init-msg-1') {
-        return [
-          {
-            ...prev[0],
-            content: TRANSLATIONS[newLang].greeting.content,
+
+    // Prevent stale initial-gesture greeting from firing in the old language
+    greetingTriggeredRef.current = true;
+    greetingAudioPlayedRef.current = true;
+
+    // Immediately stop any currently speaking voice in the previous language
+    stopSpeech();
+
+    // Update welcome message if still on initial welcome screen
+    const isOnWelcomeOnly =
+      messagesRef.current.length === 1 && messagesRef.current[0].id === 'init-msg-1';
+    if (isOnWelcomeOnly) {
+      setMessages((prev) => {
+        if (prev.length === 1 && prev[0].id === 'init-msg-1') {
+          const next = [
+            {
+              ...prev[0],
+              content: TRANSLATIONS[newLang].greeting.content,
+            },
+          ];
+          messagesRef.current = next;
+          return next;
+        }
+        return prev;
+      });
+    }
+
+    // If idle on the welcome screen with voice enabled, greet cleanly in the newly chosen language
+    if (isOnWelcomeOnly && voiceEnabled && !isBusyThinkingOrRespondingRef.current) {
+      unlockAudioContext();
+      setIsGreeting(true);
+      setRobotState('speaking');
+      try {
+        speakGreeting(
+          TRANSLATIONS[newLang].greeting.spoken,
+          () => {
+            setRobotState('idle');
+            setIsGreeting(false);
           },
-        ];
+          newLang
+        );
+      } catch {
+        setRobotState('idle');
+        setIsGreeting(false);
       }
-      return prev;
-    });
-  }, []);
+    }
+  }, [stopSpeech, voiceEnabled, unlockAudioContext, speakGreeting]);
 
   const handleToggleVoice = useCallback(() => {
     unlockAudioContext();
+    const activeLang = languageRef.current;
     const next = !voiceEnabled;
     setVoiceEnabled(next);
     if (!next) {
       stopSpeech();
     } else {
       speak(
-        language === 'en'
+        activeLang === 'en'
           ? "Voice enabled! I am SADIO, fully at your service."
           : "Voix activée ! Je suis SADIO, entièrement à votre écoute."
       );
     }
-  }, [voiceEnabled, unlockAudioContext, setVoiceEnabled, stopSpeech, speak, language]);
-
-  const handleLaunchCallModal = useCallback(() => {
-    unlockAudioContext();
-    const freshQuota = getStoredCallQuota();
-    setUsedCallSeconds(freshQuota.usedSeconds);
-    if (freshQuota.usedSeconds >= MAX_DAILY_CALL_SECONDS) {
-      setChatErrorMessage(
-        "⏳ Quota quotidien de 20 minutes d'appel vocal atteint pour aujourd'hui. Votre quota sera réinitialisé demain à minuit !"
-      );
-      return;
-    }
-    setIsCallModalOpen(true);
-  }, [unlockAudioContext]);
-
-  const handleCloseCallModal = useCallback(() => {
-    setIsCallModalOpen(false);
-    const freshQuota = getStoredCallQuota();
-    setUsedCallSeconds(freshQuota.usedSeconds);
-  }, []);
+  }, [voiceEnabled, unlockAudioContext, setVoiceEnabled, stopSpeech, speak]);
 
   const triggerWarmGreeting = useCallback(
-    (forcePlayAudio = true) => {
+    (forcePlayAudio = true, overrideLang?: Language) => {
       // Si le robot est en train de réfléchir ou de répondre, ne jamais déclencher la salutation ni couper la réponse !
       if (isBusyThinkingOrRespondingRef.current) {
         return;
       }
 
+      const activeLang = overrideLang || languageRef.current;
       setIsGreeting(true);
       greetingTriggeredRef.current = true;
 
@@ -390,35 +565,47 @@ export default function App() {
       setRobotState('speaking');
 
       try {
-        speakGreeting(TRANSLATIONS[language].greeting.spoken, () => {
-          greetingAudioPlayedRef.current = true;
-          setRobotState('idle');
-          setIsGreeting(false);
-        });
+        speakGreeting(
+          TRANSLATIONS[activeLang].greeting.spoken,
+          () => {
+            greetingAudioPlayedRef.current = true;
+            setRobotState('idle');
+            setIsGreeting(false);
+          },
+          activeLang
+        );
       } catch {
         setRobotState('idle');
         setIsGreeting(false);
       }
     },
-    [voiceEnabled, speakGreeting, unlockAudioContext, language]
+    [voiceEnabled, speakGreeting, unlockAudioContext]
   );
 
-  // Automatic warm greeting upon entering the app + INSTANT trigger on first touch/click in emulators & browsers
+  const triggerWarmGreetingRef = useRef(triggerWarmGreeting);
+  triggerWarmGreetingRef.current = triggerWarmGreeting;
+
+  // Automatic warm greeting ONLY once on initial entrance (never re-fires on language switches)
   useEffect(() => {
-    // 1. Try immediate playback at 80ms for desktop and environments allowing autoplay
     const autoGreetTimer = window.setTimeout(() => {
-      triggerWarmGreeting(true);
+      if (!greetingTriggeredRef.current && !isBusyThinkingOrRespondingRef.current) {
+        triggerWarmGreetingRef.current(true);
+      }
     }, 80);
 
-    // 2. In emulators or mobile where autoplay is silenced by browser security,
-    // any user touch/click triggers the greeting speech cleanly
-    const handleImmediateGesture = () => {
-      unlockAudioContext();
+    // In emulators or mobile where autoplay is silenced by browser security,
+    // first user touch/click triggers the greeting speech in the currently active language
+    const handleImmediateGesture = (ev: Event) => {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest?.('[data-no-auto-greet="true"]')) {
+        return;
+      }
       if (isBusyThinkingOrRespondingRef.current) {
         return;
       }
+      unlockAudioContext();
       if (!greetingAudioPlayedRef.current) {
-        triggerWarmGreeting(true);
+        triggerWarmGreetingRef.current(true);
       }
     };
 
@@ -432,7 +619,7 @@ export default function App() {
       window.removeEventListener('touchstart', handleImmediateGesture);
       window.removeEventListener('click', handleImmediateGesture);
     };
-  }, [triggerWarmGreeting, unlockAudioContext]);
+  }, [unlockAudioContext]);
 
   // Clean up any old chat history or old hide text flags in safeStorage so text displays cleanly
   useEffect(() => {
@@ -592,9 +779,12 @@ export default function App() {
     // Must have prompt or image
     if (!rawPrompt && !imageToSend) return;
 
+    const activeLang = languageRef.current;
     const prompt =
       rawPrompt ||
-      "Analyse cette image de manière complète, approfondie et détaillée. Décris tout ce que tu observes, identifie les éléments clés, retranscris et interprète les textes éventuels, et fournis une explication claire et structurée.";
+      (activeLang === 'en'
+        ? 'Analyze this image completely, thoroughly, and in detail. Describe everything you observe, identify key elements, transcribe and interpret any visible text, and provide a clear, structured explanation in English.'
+        : "Analyse cette image de manière complète, approfondie et détaillée. Décris tout ce que tu observes, identifie les éléments clés, retranscris et interprète les textes éventuels, et fournis une explication claire et structurée.");
 
     setChatErrorMessage(null);
 
@@ -641,9 +831,9 @@ export default function App() {
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
-      content: rawPrompt || "Analyse complète et détaillée de l'image",
+      content: prompt,
       timestamp: Date.now(),
-      domain: imageToSend ? "Vision d'Image" : currentDomain.label,
+      domain: imageToSend ? (activeLang === 'en' ? 'Image Vision' : "Vision d'Image") : currentDomain.label,
       image: imageToSend
         ? {
             dataUrl: imageToSend.dataUrl,
@@ -670,16 +860,45 @@ export default function App() {
     setIsStreaming(true);
     setStreamingContent('');
 
+    let accumulatedText = '';
+    let spokenCharIndex = 0;
+
+    const pumpStreamingSpeech = (forceFlush = false) => {
+      if (!voiceEnabled || currentRequestIdRef.current !== requestId) return;
+      while (true) {
+        if (currentRequestIdRef.current !== requestId) break;
+        const unparsed = accumulatedText.slice(spokenCharIndex);
+        const extracted = extractNextSpeechChunk(
+          unparsed,
+          spokenCharIndex === 0,
+          forceFlush || !isSpeechPlayingRef.current,
+          inFlightCountRef.current
+        );
+        if (!extracted) break;
+
+        spokenCharIndex += extracted.consumedLength;
+        const cleanSentence = cleanTextForSpeech(extracted.rawChunk, activeLang).trim();
+        if (cleanSentence.length > 0) {
+          enqueueStreamingSentence(cleanSentence);
+        }
+      }
+    };
+
     // Prime the speech engine immediately (0ms delay) so it is ready to speak the first word instantly
     if (voiceEnabled) {
-      startStreamingSpeech(() => {
-        if (currentRequestIdRef.current === requestId) {
-          clearThinkingTimers();
-          setIsThinking(false);
-          setThinkingSeconds(null);
-          setRobotState('speaking');
+      startStreamingSpeech(
+        () => {
+          if (currentRequestIdRef.current === requestId) {
+            clearThinkingTimers();
+            setIsThinking(false);
+            setThinkingSeconds(null);
+            setRobotState('speaking');
+          }
+        },
+        () => {
+          pumpStreamingSpeech(true);
         }
-      });
+      );
     }
 
     try {
@@ -697,7 +916,7 @@ export default function App() {
 
       const payload = {
         deepseekApiKey: deepSeekKey || undefined,
-        isCallMode: isCallModalOpen,
+        language: activeLang,
         messages: newMessages.map((m) => ({
           role: m.role,
           content: m.content,
@@ -709,18 +928,14 @@ export default function App() {
               }
             : undefined,
         })),
-        customInstructions: `${TRANSLATIONS[language].aiDirective}\n\n` + (
-          isCallModalOpen
-            ? (language === 'en'
-                ? `[LIVE HANDS-FREE VOICE CALL MODE] You are on a direct voice call with the user. Answer conversationally, clearly, fluently, and warmly in English.`
-                : `[MODE APPEL VOCAL MAINS LIBRES EN DIRECT] Tu es en appel téléphonique direct avec l'utilisateur. Ton premier cerveau est DeepSeek (et Gemini en second cerveau de secours). Réponds de manière fluide, claire, vivante et conversationnelle.`)
-            : imageToSend
-            ? (language === 'en'
-                ? `The user submitted an image for detailed visual inspection. Analyze each visible element, subject, OCR text if any, explanation and summary in English.`
-                : `L'utilisateur a soumis une image pour analyse visuelle complète et détaillée. Analyse méticuleusement chaque élément visible, le sujet, le texte OCR éventuel, l'explication et la synthèse.`)
-            : (language === 'en'
-                ? `Domain: ${currentDomain.label}. Provide a complete, rigorous, and detailed response in English.`
-                : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout.`)
+        customInstructions: `${TRANSLATIONS[activeLang].aiDirective}\n\n` + (
+          imageToSend
+            ? (activeLang === 'en'
+                ? `The user submitted an image for detailed visual inspection. Analyze each visible element, subject, OCR text if any, explanation and summary strictly in English.`
+                : `L'utilisateur a soumis une image pour analyse visuelle complète et détaillée. Analyse méticuleusement chaque élément visible, le sujet, le texte OCR éventuel, l'explication et la synthèse strictement en français.`)
+            : (activeLang === 'en'
+                ? `Domain: ${currentDomain.label}. Provide a complete, rigorous, and detailed response strictly in English.`
+                : `Domaine : ${currentDomain.label}. Fournis une réponse complète, détaillée, sans aucune abréviation, de bout en bout, strictement en français.`)
         ),
       };
 
@@ -789,9 +1004,7 @@ export default function App() {
       const tReaderReady = performance.now();
       console.log(`⏱️ [SADIO LATENCE] [T4 = +${(tReaderReady - tStart).toFixed(0)} ms] Flux SSE ouvert. En attente du 1er paquet de tokens...`);
 
-      let accumulatedText = '';
       let buffer = '';
-      let spokenCharIndex = 0;
       let firstTokenLogged = false;
       let tFirstToken = 0;
       let tokenChunkCount = 0;
@@ -842,62 +1055,8 @@ export default function App() {
                     setThinkingSeconds(null);
                   }
 
-                  // Queue full sentences into speech queue
-                  if (voiceEnabled) {
-                    while (true) {
-                      if (currentRequestIdRef.current !== requestId) break;
-                      const unparsed = accumulatedText.slice(spokenCharIndex);
-                      if (!unparsed || unparsed.trim().length < 2) break;
-
-                      let sentenceMatch: RegExpMatchArray | null = null;
-
-                      if (spokenCharIndex === 0) {
-                        // 1. FAST ONSET: Start speaking on the first complete short sentence (~20-90 chars)
-                        sentenceMatch = unparsed.match(/^([\s\S]{15,90}?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
-                      } else {
-                        // 2. CONTINUOUS SPEECH: Group sentences into passages of 120-260 chars for natural cadence
-                        if (unparsed.length >= 140) {
-                          sentenceMatch = unparsed.match(/^([\s\S]{120,260}?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
-                        } else if (unparsed.includes('\n\n')) {
-                          sentenceMatch = unparsed.match(/^([\s\S]+?\n\n+)(?:\s+|$)/);
-                        } else if (!isSpeaking) {
-                          // If speech has caught up and audio is waiting, speak any completed sentence immediately
-                          sentenceMatch = unparsed.match(/^([\s\S]*?(?:(?<!\d)[.!?…]+(?!\d)|\n\n+))(?:\s+|$)/);
-                        }
-                      }
-
-                      if (sentenceMatch && sentenceMatch[1].trim().length >= 2) {
-                        const matchedChunk = sentenceMatch[1];
-                        const rawLength = sentenceMatch[0].length;
-                        spokenCharIndex += rawLength;
-
-                        let cleanSentence = cleanTextForSpeech(matchedChunk).trim();
-                        if (cleanSentence.length > 0) {
-                          if (!/[.!?…]$/.test(cleanSentence)) {
-                            cleanSentence += '.';
-                          }
-                          enqueueStreamingSentence(cleanSentence);
-                        }
-                      } else {
-                        // 3. Fallback for very long continuous text without punctuation
-                        if (unparsed.length > 220) {
-                          const fallbackMatch = unparsed.match(/^([\s\S]{100,220}?\s+)/);
-                          if (fallbackMatch && fallbackMatch[1].trim().length >= 30) {
-                            spokenCharIndex += fallbackMatch[0].length;
-                            let fallbackSentence = cleanTextForSpeech(fallbackMatch[1]).trim();
-                            if (fallbackSentence.length > 0) {
-                              if (!/[.!?…]$/.test(fallbackSentence)) {
-                                fallbackSentence += '.';
-                              }
-                              enqueueStreamingSentence(fallbackSentence);
-                            }
-                            continue;
-                          }
-                        }
-                        break;
-                      }
-                    }
-                  }
+                  // Queue complete natural sentences/passages into speech queue
+                  pumpStreamingSpeech(false);
                 }
               }
               if (data.error && currentRequestIdRef.current === requestId) {
@@ -957,13 +1116,25 @@ export default function App() {
       }
 
 
-      // Enqueue any remaining sentence and finish speech
+      // Enqueue any remaining sentences cleanly and finish speech
       if (voiceEnabled) {
         setSpeakingMessageId(botMessageId);
         const remaining = accumulatedText.slice(spokenCharIndex).trim();
-        let finalSentence = cleanTextForSpeech(remaining).trim();
-        if (finalSentence.length > 0 && !/[.!?…]$/.test(finalSentence)) {
-          finalSentence += '.';
+        if (remaining) {
+          const tailPassages = splitIntoSentences(remaining, 230);
+          if (tailPassages.length > 0) {
+            for (const tail of tailPassages) {
+              const cleanedTail = cleanTextForSpeech(tail, activeLang).trim();
+              if (cleanedTail.length >= 2) {
+                enqueueStreamingSentence(cleanedTail);
+              }
+            }
+          } else {
+            const cleanedTail = cleanTextForSpeech(remaining, activeLang).trim();
+            if (cleanedTail.length >= 2) {
+              enqueueStreamingSentence(cleanedTail);
+            }
+          }
         }
 
         let callbackFired = false;
@@ -973,9 +1144,9 @@ export default function App() {
             setSpeakingMessageId(null);
             setRobotState('idle');
           }
-        }, 8000);
+        }, 60000);
 
-        finishStreamingSpeech(finalSentence, () => {
+        finishStreamingSpeech(undefined, () => {
           if (!callbackFired && currentRequestIdRef.current === requestId) {
             callbackFired = true;
             clearTimeout(safetyTimer);
@@ -1040,16 +1211,17 @@ export default function App() {
 
   const handleClearMessages = () => {
     handleStop();
-    setMessages([
-      {
-        id: 'init-msg-1',
-        role: 'model',
-        content: TRANSLATIONS[language].greeting.content,
-        timestamp: Date.now(),
-        domain: 'Tous Domaines',
-      },
-    ]);
-    triggerWarmGreeting(true);
+    const activeLang = languageRef.current;
+    const initMsg: ChatMessage = {
+      id: 'init-msg-1',
+      role: 'model',
+      content: TRANSLATIONS[activeLang].greeting.content,
+      timestamp: Date.now(),
+      domain: 'Tous Domaines',
+    };
+    messagesRef.current = [initMsg];
+    setMessages([initMsg]);
+    triggerWarmGreeting(true, activeLang);
   };
 
   const handleAvatarInteractiveClick = () => {
@@ -1065,64 +1237,6 @@ export default function App() {
   const renderChatInput = (maxWidthClass = 'max-w-3xl') => (
     <div className="w-full p-2.5 sm:p-4 bg-slate-950/90 border-t border-slate-800/80 shrink-0 backdrop-blur-md pb-safe">
       <div className={`${maxWidthClass} mx-auto relative flex flex-col gap-1.5 sm:gap-2`}>
-        {/* Quick-Launch Chips: Mode Appel Mains Libres & Scanner OCR & Maths */}
-        <div className="flex items-center px-1 overflow-x-auto pb-1 scrollbar-none gap-2">
-            <button
-              type="button"
-              onClick={handleLaunchCallModal}
-              className={`group shrink-0 inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold shadow-md transition-all active:scale-95 ${
-                isCallQuotaExhausted
-                  ? 'bg-slate-900/60 border-slate-700/60 text-slate-400 opacity-70'
-                  : remainingCallSeconds <= 120
-                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 shadow-amber-950/40 animate-pulse'
-                  : 'bg-gradient-to-r from-emerald-500/15 via-teal-500/15 to-cyan-500/15 hover:from-emerald-500/25 hover:to-teal-500/25 border-emerald-500/40 hover:border-emerald-400 text-emerald-300 shadow-emerald-950/40'
-              }`}
-              title={
-                isCallQuotaExhausted
-                  ? TRANSLATIONS[language].input.callQuotaExhausted
-                  : `${TRANSLATIONS[language].input.launchCall} (${language === 'fr' ? 'Reste' : 'Remaining'} ${formatCallTime(remainingCallSeconds)})`
-              }
-            >
-              <span className="relative flex h-2 w-2">
-                {!isCallQuotaExhausted && (
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                )}
-                <span
-                  className={`relative inline-flex rounded-full h-2 w-2 ${
-                    isCallQuotaExhausted ? 'bg-slate-500' : 'bg-emerald-400'
-                  }`}
-                ></span>
-              </span>
-              <Phone className="w-3.5 h-3.5 text-current group-hover:scale-110 transition-transform" />
-              <span>{TRANSLATIONS[language].input.handsFree}</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 font-mono">
-                {isCallQuotaExhausted ? '0 min' : `${Math.ceil(remainingCallSeconds / 60)}m`}
-              </span>
-            </button>
-
-            {/* Scanner OCR Universel Quick Button */}
-            <button
-              type="button"
-              onClick={() => setIsOcrModalOpen(true)}
-              className="group shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-cyan-500/40 bg-gradient-to-r from-cyan-500/15 to-blue-500/15 hover:from-cyan-500/25 hover:to-blue-500/25 text-cyan-300 text-xs font-semibold shadow-md transition-all active:scale-95"
-              title={language === 'fr' ? "Scanner un texte depuis une photo ou un document" : "Scan text from a photo or document"}
-            >
-              <ScanText className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform" />
-              <span>{TRANSLATIONS[language].input.ocr}</span>
-            </button>
-
-            {/* Résolveur Maths & Graphiques Quick Button */}
-            <button
-              type="button"
-              onClick={() => setIsMathModalOpen(true)}
-              className="group shrink-0 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full border border-purple-500/40 bg-gradient-to-r from-purple-500/15 via-indigo-500/15 to-cyan-500/15 hover:from-purple-500/25 hover:to-indigo-500/25 text-purple-200 text-xs font-semibold shadow-md transition-all active:scale-95"
-              title={language === 'fr' ? "Résoudre des équations pas à pas et tracer des graphiques" : "Solve equations step-by-step and plot graphs"}
-            >
-              <LineChart className="w-3.5 h-3.5 text-purple-400 group-hover:scale-110 transition-transform" />
-              <span>{TRANSLATIONS[language].input.math}</span>
-            </button>
-        </div>
-
         <div className="relative flex flex-col rounded-2xl bg-slate-900/90 border border-slate-700/80 focus-within:border-cyan-500/80 focus-within:ring-2 focus-within:ring-cyan-500/20 shadow-xl transition-all overflow-hidden">
           {/* Selected image preview chip */}
           {selectedImage && (
@@ -1171,28 +1285,10 @@ export default function App() {
                   : TRANSLATIONS[language].input.placeholderNormal
               }
               rows={1}
-              className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-3.5 sm:pl-4 pr-32 sm:pr-36 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
+              className="w-full resize-none bg-transparent py-2.5 sm:py-3 pl-3.5 sm:pl-4 pr-24 sm:pr-28 text-base sm:text-sm text-slate-100 placeholder-slate-500 focus:outline-none min-h-[44px] max-h-[140px]"
             />
 
             <div className="absolute right-1.5 sm:right-2 flex items-center gap-1">
-              {/* Hands-Free Call Mode Quick Button */}
-              <button
-                type="button"
-                onClick={handleLaunchCallModal}
-                title={
-                  isCallQuotaExhausted
-                    ? TRANSLATIONS[language].input.callQuotaExhausted
-                    : `${TRANSLATIONS[language].input.launchCall} (${language === 'fr' ? 'Reste' : 'Remaining'} ${formatCallTime(remainingCallSeconds)})`
-                }
-                className={`min-h-[38px] min-w-[38px] flex items-center justify-center p-2 rounded-xl border transition-all active:scale-95 shadow-sm ${
-                  isCallQuotaExhausted
-                    ? 'text-slate-500 border-slate-800 bg-slate-900/40 opacity-50'
-                    : 'text-emerald-400 hover:text-emerald-300 hover:bg-emerald-950/50 border-emerald-500/30 hover:border-emerald-400/60'
-                }`}
-              >
-                <Phone className="w-4 h-4" />
-              </button>
-
               {/* Voice speech-to-text mic */}
               {isSpeechSupported && (
                 <button
@@ -1541,7 +1637,7 @@ export default function App() {
             currentCharIndex={currentCharIndex}
             onSpeak={(text) => {
               unlockAudioContext();
-              speak(text);
+              speak(text, undefined, undefined, true);
             }}
             onSpeakFromSentence={(sentenceIdx) => {
               unlockAudioContext();
@@ -1579,7 +1675,6 @@ export default function App() {
         onSelectVoice={setSelectedVoice}
         messages={messages}
         onClearMessages={handleClearMessages}
-        usedCallSeconds={usedCallSeconds}
         voiceEnabled={voiceEnabled}
         onToggleVoice={handleToggleVoice}
         onTestVoice={testVoice}
@@ -1610,56 +1705,6 @@ export default function App() {
         user={user}
         access={access}
         token={token}
-      />
-
-      {/* Mode Appel Mains Libres (Max 20 minutes cumulées / jour) */}
-      <HandsFreeCallModal
-        isActive={isCallModalOpen}
-        onClose={handleCloseCallModal}
-        onSendMessage={handleSendMessage}
-        isSpeaking={isSpeaking}
-        isThinking={isThinking}
-        isStreaming={isStreaming}
-        currentSentence={currentSentence}
-        onStopSpeech={handleStop}
-        onOpenDocumentModal={() => setShowFullTextModal(true)}
-        totalUsedSeconds={usedCallSeconds}
-        onTickUsedSeconds={handleTickUsedCallSeconds}
-        language={language}
-      />
-
-      {/* Scanner OCR Universel (100% 0 F) Modal */}
-      <OcrScannerModal
-        isOpen={isOcrModalOpen}
-        onClose={() => setIsOcrModalOpen(false)}
-        onApplyTextToInput={(extractedText) => {
-          setInput(extractedText);
-          inputRef.current?.focus();
-        }}
-        onSpeakText={(text) => {
-          unlockAudioContext();
-          speak(text);
-        }}
-        onSolveMath={(scannedMath) => {
-          setIsOcrModalOpen(false);
-          setMathEquationToSolve(scannedMath.trim());
-          setIsMathModalOpen(true);
-        }}
-      />
-
-      {/* Résolveur Étape par Étape & Traceur de Graphiques Mathématiques (100% 0 F) */}
-      <MathSolverModal
-        isOpen={isMathModalOpen}
-        onClose={() => setIsMathModalOpen(false)}
-        initialEquation={mathEquationToSolve}
-        onApplyTextToInput={(text) => {
-          setInput(text);
-          inputRef.current?.focus();
-        }}
-        onSpeakText={(text) => {
-          unlockAudioContext();
-          speak(text);
-        }}
       />
     </div>
   );

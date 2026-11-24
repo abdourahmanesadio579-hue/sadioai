@@ -250,10 +250,11 @@ async function streamFromOpenAICompatible(options: {
   model: string;
   messages: Array<{ role: string; content?: string }>;
   systemInstruction: string;
+  targetLanguage?: 'fr' | 'en';
   res: Response;
   heartbeat: NodeJS.Timeout;
 }): Promise<{ success: boolean; status?: number; error?: string }> {
-  const { url, apiKey, model, messages, systemInstruction, res, heartbeat } = options;
+  const { url, apiKey, model, messages, systemInstruction, targetLanguage = 'fr', res, heartbeat } = options;
   try {
     const cleanList = messages.filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0);
     const firstUserIdx = cleanList.findIndex((m) => m.role === 'user');
@@ -293,81 +294,139 @@ async function streamFromOpenAICompatible(options: {
       return { success: false, error: 'Formatted messages empty' };
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000); // 25s timeout for DeepSeek
+    // Reinforce language lock right on the final user prompt so mixed-language history never bleeds through
+    const lastIdx = formattedMessages.length - 1;
+    formattedMessages[lastIdx] = {
+      ...formattedMessages[lastIdx],
+      content:
+        targetLanguage === 'en'
+          ? `${formattedMessages[lastIdx].content}\n\n[Language requirement: Respond exclusively in English.]`
+          : `${formattedMessages[lastIdx].content}\n\n[Exigence de langue : Réponds exclusivement en français.]`,
+    };
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://sadioai.onrender.com',
-        'X-Title': 'SADIO AI Robot',
-      },
-      body: JSON.stringify({
-        model,
-        messages: formattedMessages,
-        stream: true,
-        temperature: 0.65,
-      }),
-      signal: controller.signal,
-    });
+    const MAX_ATTEMPTS = 2;
+    let lastStatus: number | undefined;
+    let lastError = 'Unknown upstream error';
 
-    clearTimeout(timeout);
-
-    if (!response.ok || !response.body) {
-      const errorText = await response.text().catch(() => '');
-      if (response.status === 402 || errorText.toLowerCase().includes('insufficient balance')) {
-        console.warn(`⚠️ [SADIO DEEPSEEK] HTTP 402 - Solde insuffisant sur DeepSeek ! Veuillez recharger 2$ sur platform.deepseek.com.`);
-      } else {
-        console.warn(`⚠️ [SADIO FAILOVER] DeepSeek API a retourné HTTP ${response.status} : ${errorText.slice(0, 300)}`);
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (res.destroyed || res.writableEnded) {
+        return { success: false, status: lastStatus, error: 'Client disconnected' };
       }
-      return { success: false, status: response.status, error: errorText };
-    }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
-    let hasSentTokens = false;
+      const controller = new AbortController();
+      let timeout: NodeJS.Timeout | null = setTimeout(() => controller.abort(), 18000);
+      const resetIdleTimeout = (ms: number) => {
+        if (timeout) clearTimeout(timeout);
+        timeout = setTimeout(() => controller.abort(), ms);
+      };
 
-    while (true) {
-      if (res.destroyed || res.writableEnded) break;
-      const { done, value } = await reader.read();
-      if (done) break;
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+            'HTTP-Referer': 'https://sadioai.onrender.com',
+            'X-Title': 'SADIO AI Robot',
+          },
+          body: JSON.stringify({
+            model,
+            messages: formattedMessages,
+            stream: true,
+            temperature: 0.65,
+          }),
+          signal: controller.signal,
+        });
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith(':')) continue;
-        if (trimmed === 'data: [DONE]') continue;
-        if (trimmed.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(trimmed.slice(6));
-            const delta = data.choices?.[0]?.delta?.content || '';
-            if (delta) {
-              hasSentTokens = true;
-              res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
-              (res as any).flush?.();
-            }
-          } catch {
-            // Ignore parse errors on individual stream chunks
+        if (!response.ok || !response.body) {
+          if (timeout) clearTimeout(timeout);
+          const errorText = await response.text().catch(() => '');
+          lastStatus = response.status;
+          lastError = errorText;
+          if (response.status === 402 || errorText.toLowerCase().includes('insufficient balance')) {
+            console.warn(`⚠️ [SADIO DEEPSEEK] HTTP 402 - Solde insuffisant sur DeepSeek ! Veuillez recharger 2$ sur platform.deepseek.com.`);
+            return { success: false, status: response.status, error: errorText };
           }
+          if (response.status === 401 || response.status === 403 || response.status === 400) {
+            console.warn(`⚠️ [SADIO FAILOVER] DeepSeek API a retourné HTTP ${response.status} : ${errorText.slice(0, 300)}`);
+            return { success: false, status: response.status, error: errorText };
+          }
+          console.warn(`⚠️ [SADIO DEEPSEEK] Tentative ${attempt}/${MAX_ATTEMPTS} HTTP ${response.status} : ${errorText.slice(0, 200)}`);
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, 450));
+            continue;
+          }
+          return { success: false, status: response.status, error: errorText };
+        }
+
+        // Keep timeout active while awaiting first token (18s), then refresh per chunk (20s)
+        resetIdleTimeout(18000);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let hasSentTokens = false;
+
+        try {
+          while (true) {
+            if (res.destroyed || res.writableEnded) break;
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            resetIdleTimeout(20000);
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith(':')) continue;
+              if (trimmed === 'data: [DONE]') continue;
+              if (trimmed.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(trimmed.slice(6));
+                  const delta = data.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    hasSentTokens = true;
+                    res.write(`data: ${JSON.stringify({ text: delta })}\n\n`);
+                    (res as any).flush?.();
+                  }
+                } catch {
+                  // Ignore parse errors on individual stream chunks
+                }
+              }
+            }
+          }
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+
+        if (hasSentTokens) {
+          if (!res.destroyed && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+            clearInterval(heartbeat);
+            res.end();
+          }
+          return { success: true, status: 200 };
+        }
+
+        lastError = 'No tokens received';
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, 450));
+          continue;
+        }
+        return { success: false, status: response.status, error: lastError };
+      } catch (attemptErr: any) {
+        if (timeout) clearTimeout(timeout);
+        lastError = attemptErr?.message || String(attemptErr);
+        console.warn(`⚠️ [SADIO DEEPSEEK] Tentative ${attempt}/${MAX_ATTEMPTS} erreur réseau/timeout:`, lastError);
+        if (attempt < MAX_ATTEMPTS && !res.destroyed && !res.writableEnded) {
+          await new Promise((r) => setTimeout(r, 450));
+          continue;
         }
       }
     }
 
-    if (hasSentTokens) {
-      if (!res.destroyed && !res.writableEnded) {
-        res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-        clearInterval(heartbeat);
-        res.end();
-      }
-      return { success: true, status: 200 };
-    }
-    return { success: false, status: response.status, error: 'No tokens received' };
+    return { success: false, status: lastStatus, error: lastError };
   } catch (err: any) {
     console.warn(`Error during fallback streaming to ${url}:`, err?.message || err);
     return { success: false, error: err?.message || String(err) };
@@ -411,7 +470,7 @@ async function startServer() {
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
     res.setHeader(
       'Access-Control-Allow-Headers',
-      'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature, x-deepseek-key, x-device-fingerprint, x-ocr-challenge'
+      'Content-Type, Authorization, x-guest-demo, x-signature, x-bictorys-signature, x-deepseek-key, x-device-fingerprint, x-ocr-challenge, x-sadio-stream-v2'
     );
     if (req.method === 'OPTIONS') {
       res.sendStatus(200);
@@ -841,14 +900,17 @@ async function startServer() {
     res.setHeader('Connection', 'keep-alive');
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders?.();
+    res.write(': connected\n\n');
+    (res as any).flush?.();
 
     const contents = sanitizeMessagesForGemini(messages);
 
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) {
+      if (!res.writableEnded && !res.destroyed) {
         res.write(': keepalive\n\n');
+        (res as any).flush?.();
       }
-    }, 2500);
+    }, 1500);
 
     res.on('close', () => {
       clearInterval(heartbeat);
@@ -910,6 +972,7 @@ async function startServer() {
         model: 'deepseek-chat',
         messages,
         systemInstruction,
+        targetLanguage: requestedLanguage,
         res,
         heartbeat,
       });
@@ -936,59 +999,207 @@ async function startServer() {
 
     // CERVEAU N°2 (SECOURS / VISION) : Google Gemini
     const modelsToTry = hasImage
-      ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash']
-      : ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+      ? ['gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-hydrogen']
+      : ['gemini-4-hydrogen', 'gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.8-flash', 'gemini-3.1-flash-lite'];
+
+    const supportsCleanClientRetry =
+      req.headers['x-sadio-stream-v2'] === '1' || req.body?.clientStreamV2 === true;
 
     if (!streamedSuccessfully && ai && contents.length > 0) {
+      const geminiContents = contents.map((turn, idx) =>
+        idx === contents.length - 1 && turn.role === 'user'
+          ? {
+              ...turn,
+              parts: [
+                ...turn.parts,
+                {
+                  text:
+                    requestedLanguage === 'en'
+                      ? '\n\n[Language requirement: Respond exclusively in English.]'
+                      : '\n\n[Exigence de langue : Réponds exclusivement en français.]',
+                },
+              ],
+            }
+          : turn
+      );
       console.log(
         `🤖 [SADIO ${isCallMode ? 'APPEL VOCAL' : 'CHAT'}] Cerveau N°2 : Google Gemini (${modelsToTry[0]}) en charge...`
       );
       res.write(`data: ${JSON.stringify({ brain: 'gemini', model: modelsToTry[0], isCallMode })}\n\n`);
       (res as any).flush?.();
-      for (const modelName of modelsToTry) {
-        if (res.destroyed || res.writableEnded) break;
 
-        try {
-          const config: Record<string, any> = {
-            systemInstruction,
-            maxOutputTokens: 4096,
-          };
-
-          // Timeout généreux de 25 secondes pour laisser le temps aux réponses détaillées et aux connexions mobiles
-          const streamPromise = ai.models.generateContentStream({
-            model: modelName,
-            contents,
-            config,
-          });
-
-          const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout de connexion au modèle ${modelName} (>25s)`)), 25000)
-          );
-
-          const responseStream = await Promise.race([streamPromise, timeoutPromise]);
-
-          let hasReceivedTokens = false;
-          for await (const chunk of responseStream) {
+      const runGeminiPass = async (modelList: string[], delayBetweenAttemptsMs = 0) => {
+        for (let mIdx = 0; mIdx < modelList.length; mIdx++) {
+          const modelName = modelList[mIdx];
+          if (res.destroyed || res.writableEnded) break;
+          if (mIdx > 0 && delayBetweenAttemptsMs > 0) {
+            await new Promise((r) => setTimeout(r, delayBetweenAttemptsMs));
             if (res.destroyed || res.writableEnded) break;
-            if (chunk.text) {
-              hasReceivedTokens = true;
-              res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+          }
+
+          let firstTokenTimer: NodeJS.Timeout | null = null;
+          let timedOut = false;
+          let streamedForModel = '';
+          try {
+            const config: Record<string, any> = {
+              systemInstruction,
+              maxOutputTokens: 4096,
+            };
+
+            // Enforce a 22s timeout across connection establishment AND waiting for the very first token
+            const firstTokenGuard = new Promise<never>((_, reject) => {
+              firstTokenTimer = setTimeout(() => {
+                timedOut = true;
+                reject(new Error(`Timeout de connexion au modèle ${modelName} (>22s)`));
+              }, 22000);
+            });
+
+            const consumeModelStream = (async () => {
+              const responseStream = await ai.models.generateContentStream({
+                model: modelName,
+                contents: geminiContents,
+                config,
+              });
+
+              let hasReceivedTokens = false;
+              for await (const chunk of responseStream) {
+                if (timedOut || res.destroyed || res.writableEnded) break;
+                if (chunk.text) {
+                  if (!hasReceivedTokens && firstTokenTimer) {
+                    clearTimeout(firstTokenTimer);
+                    firstTokenTimer = null;
+                  }
+                  hasReceivedTokens = true;
+                  streamedForModel += chunk.text;
+                  res.write(`data: ${JSON.stringify({ text: chunk.text })}\n\n`);
+                  (res as any).flush?.();
+                }
+              }
+              return hasReceivedTokens;
+            })();
+
+            const hasReceivedTokens = await Promise.race([consumeModelStream, firstTokenGuard]);
+            if (firstTokenTimer) {
+              clearTimeout(firstTokenTimer);
+              firstTokenTimer = null;
+            }
+
+            if (hasReceivedTokens) {
+              if (!res.destroyed && !res.writableEnded) {
+                res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+                clearInterval(heartbeat);
+                res.end();
+              }
+              streamedSuccessfully = true;
+              break;
+            }
+          } catch (err: any) {
+            if (firstTokenTimer) {
+              clearTimeout(firstTokenTimer);
+              firstTokenTimer = null;
+            }
+            const errMsg = err?.message || String(err);
+
+            // If this model already streamed substantial prose before a mid-stream 503/drop,
+            // finish cleanly without overwriting or appending a "network latency" error!
+            if (streamedForModel.trim().length >= 80) {
+              console.warn(`Gemini stream ended slightly early on ${modelName} after ${streamedForModel.length} chars; closing cleanly:`, errMsg);
+              if (!res.destroyed && !res.writableEnded) {
+                res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+                clearInterval(heartbeat);
+                res.end();
+              }
+              streamedSuccessfully = true;
+              break;
+            }
+
+            // If only a tiny partial fragment (<80 chars) leaked before failure, reset client buffer cleanly before trying next model
+            if (streamedForModel.length > 0 && !res.destroyed && !res.writableEnded) {
+              res.write(`data: ${JSON.stringify({ resetText: true })}\n\n`);
               (res as any).flush?.();
             }
-          }
 
-          if (hasReceivedTokens) {
-            if (!res.destroyed && !res.writableEnded) {
-              res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
-              clearInterval(heartbeat);
-              res.end();
+            // Keep meaningful 429/403 errors rather than overwriting with a later model error
+            if (
+              !lastErrorMsg ||
+              errMsg.includes('RESOURCE_EXHAUSTED') ||
+              errMsg.includes('429') ||
+              errMsg.includes('API_KEY_INVALID') ||
+              errMsg.includes('PERMISSION_DENIED') ||
+              errMsg.includes('403')
+            ) {
+              lastErrorMsg = errMsg;
             }
-            streamedSuccessfully = true;
-            break;
+            console.warn(`Gemini streaming attempt failed on model ${modelName}:`, errMsg);
           }
-        } catch (err: any) {
-          lastErrorMsg = err?.message || String(err);
-          console.warn(`Gemini streaming attempt failed on model ${modelName}:`, lastErrorMsg);
+        }
+      };
+
+      await runGeminiPass(modelsToTry, 150);
+
+      // Spaced retry passes when upstream experiences temporary 503 high-demand spikes or cold sockets
+      const retryDelays = [900, 1800];
+      for (const waitMs of retryDelays) {
+        if (
+          streamedSuccessfully ||
+          res.destroyed ||
+          res.writableEnded ||
+          lastErrorMsg.includes('API_KEY_INVALID') ||
+          lastErrorMsg.includes('PERMISSION_DENIED')
+        ) {
+          break;
+        }
+        await new Promise((r) => setTimeout(r, waitMs));
+        if (res.destroyed || res.writableEnded) break;
+        await runGeminiPass(['gemini-4-hydrogen', 'gemini-flash-lite-latest', 'gemini-flash-latest', 'gemini-3.8-flash'], 250);
+      }
+
+      // Final non-streaming single-shot fallback in case upstream streaming endpoints hit a transient proxy glitch
+      if (
+        !streamedSuccessfully &&
+        !res.destroyed &&
+        !res.writableEnded &&
+        !lastErrorMsg.includes('API_KEY_INVALID') &&
+        !lastErrorMsg.includes('PERMISSION_DENIED')
+      ) {
+        for (const unaryModel of ['gemini-4-hydrogen', 'gemini-flash-lite-latest']) {
+          if (res.destroyed || res.writableEnded || streamedSuccessfully) break;
+          let unaryTimer: NodeJS.Timeout | null = null;
+          try {
+            const unaryResult = await Promise.race([
+              ai.models.generateContent({
+                model: unaryModel,
+                contents: geminiContents,
+                config: { systemInstruction, maxOutputTokens: 4096 },
+              }),
+              new Promise<never>((_, reject) => {
+                unaryTimer = setTimeout(() => reject(new Error(`Timeout non-stream ${unaryModel}`)), 22000);
+              }),
+            ]);
+            if (unaryTimer) {
+              clearTimeout(unaryTimer);
+              unaryTimer = null;
+            }
+            const fullText = unaryResult?.text?.trim();
+            if (fullText && !res.destroyed && !res.writableEnded) {
+              const parts = fullText.match(/.{1,48}/g) || [fullText];
+              for (const part of parts) {
+                if (res.destroyed || res.writableEnded) break;
+                res.write(`data: ${JSON.stringify({ text: part })}\n\n`);
+                (res as any).flush?.();
+              }
+              if (!res.destroyed && !res.writableEnded) {
+                res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+                clearInterval(heartbeat);
+                res.end();
+              }
+              streamedSuccessfully = true;
+              break;
+            }
+          } catch (unaryErr: any) {
+            if (unaryTimer) clearTimeout(unaryTimer);
+            console.warn(`Gemini unary fallback failed on ${unaryModel}:`, unaryErr?.message || unaryErr);
+          }
         }
       }
     }
@@ -1005,6 +1216,7 @@ async function startServer() {
           model: 'llama-3.3-70b-versatile',
           messages,
           systemInstruction,
+          targetLanguage: requestedLanguage,
           res,
           heartbeat,
         });
@@ -1017,6 +1229,7 @@ async function startServer() {
           model: 'deepseek/deepseek-chat',
           messages,
           systemInstruction,
+          targetLanguage: requestedLanguage,
           res,
           heartbeat,
         });
@@ -1026,6 +1239,32 @@ async function startServer() {
 
     if (streamedSuccessfully) return;
 
+    const isKeyMissing = !ai;
+    const isQuotaError = lastErrorMsg.includes('RESOURCE_EXHAUSTED') || lastErrorMsg.includes('429');
+    const isAuthError =
+      lastErrorMsg.includes('API_KEY_INVALID') ||
+      lastErrorMsg.includes('PERMISSION_DENIED') ||
+      lastErrorMsg.includes('403');
+
+    // For updated clients (x-sadio-stream-v2), signal transient upstream congestion so the client can
+    // transparently retry instead of making the robot speak a "network latency" fallback monologue.
+    if (supportsCleanClientRetry && !isKeyMissing && !isQuotaError && !isAuthError) {
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(
+          `data: ${JSON.stringify({
+            transientError: true,
+            error:
+              requestedLanguage === 'en'
+                ? 'Temporary server congestion. Reconnecting automatically...'
+                : 'Encombrement temporaire du serveur. Nouvelle tentative...',
+          })}\n\n`
+        );
+        clearInterval(heartbeat);
+        res.end();
+      }
+      return;
+    }
+
     // INTELLIGENT & TRANSPARENT DIAGNOSTIC FALLBACK STREAMING
     // If the API key is unconfigured, exhausted (429), or invalid (403), Sadio clearly states it
     // so the administrator immediately knows what to fix in Google Cloud / Render.
@@ -1034,11 +1273,11 @@ async function startServer() {
 
     let fallbackReply = '';
 
-    if (!ai) {
+    if (isKeyMissing) {
       fallbackReply = `⚠️ **Configuration requise : Clé API Gemini manquante**\n\nLe serveur de SADIO n'a pas détecté de clé \`GEMINI_API_KEY\` dans ses variables d'environnement.\n\nPour connecter le cerveau d'intelligence artificielle :\n1. Rendez-vous sur votre tableau de bord d'hébergement (ex. Render.com -> *Environment*).\n2. Ajoutez la variable d'environnement \`GEMINI_API_KEY\` avec votre clé Google AI Studio.\n3. Redémarrez le service pour activer les réponses en temps réel.`;
-    } else if (lastErrorMsg.includes('RESOURCE_EXHAUSTED') || lastErrorMsg.includes('429')) {
+    } else if (isQuotaError) {
       fallbackReply = `⚠️ **Avis de Quota : Limite d'appels API atteinte (Erreur 429)**\n\nLe quota gratuit ou la limite de requêtes par minute de votre clé Gemini a été temporairement dépassé.\n\n- **Si vous êtes l'administrateur** : Activez la facturation Pay-as-you-go sur Google AI Studio / Google Cloud Console pour débloquer des quotas illimités et garantir une disponibilité permanente.\n- **Pour reprendre la discussion** : Patientez une minute, le temps que le quota de requêtes se réinitialise.`;
-    } else if (lastErrorMsg.includes('API_KEY_INVALID') || lastErrorMsg.includes('PERMISSION_DENIED') || lastErrorMsg.includes('403')) {
+    } else if (isAuthError) {
       fallbackReply = `⚠️ **Avis d'Authentification : Clé Gemini non reconnue (Erreur 403)**\n\nLa clé API Gemini configurée est invalide ou restreinte dans Google Cloud Console.\n\n- Vérifiez que la clé n'a pas été supprimée ou régénérée dans Google AI Studio.\n- Assurez-vous qu'aucune restriction HTTP ou IP bloquante n'a été appliquée à la clé.`;
     } else {
       // General conversational fallback if temporarily unreachable
@@ -1787,8 +2026,8 @@ Consigne absolue :
   });
 
   if (!isProduction && fs.existsSync(path.resolve(__dirname, 'index.html'))) {
-    // Self-destructing cleanup SW for any client that cached an earlier VitePWA dev-sw.js
-    app.get('/dev-sw.js', (_req: Request, res: Response) => {
+    // Self-destructing cleanup SW for any client that cached an earlier VitePWA dev-sw.js or sw.js
+    const cleanupSwHandler = (_req: Request, res: Response) => {
       res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
       res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.send(`self.addEventListener('install', () => self.skipWaiting());
@@ -1798,7 +2037,9 @@ self.addEventListener('activate', (event) => {
       .then(() => self.registration.unregister())
   );
 });`);
-    });
+    };
+    app.get('/dev-sw.js', cleanupSwHandler);
+    app.get('/sw.js', cleanupSwHandler);
 
     const vite = await createViteServer({
       server: { middlewareMode: true, host: '0.0.0.0', port: PORT },
@@ -1821,9 +2062,12 @@ self.addEventListener('activate', (event) => {
     }
   }
 
-  app.listen(PORT, HOST, () => {
+  const httpServer = app.listen(PORT, HOST, () => {
     console.log(`RoboOmni Server listening on http://${HOST}:${PORT}`);
   });
+  httpServer.keepAliveTimeout = 65000;
+  httpServer.headersTimeout = 66000;
+  httpServer.requestTimeout = 300000;
 }
 
 startServer().catch((err) => {

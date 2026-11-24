@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RobotState, RobotTheme } from '../types/chat';
-import { Sparkles, Cpu, Volume2, VolumeX, Eye, Zap, ShieldCheck } from 'lucide-react';
+import { Sparkles, Cpu, Volume2, VolumeX, Eye, Zap, ShieldCheck, X } from 'lucide-react';
 
 interface StandingRobotAvatarProps {
   state: RobotState;
@@ -10,11 +10,67 @@ interface StandingRobotAvatarProps {
   currentSpeechSnippet?: string;
   thinkingCountdown?: number | null;
   isThinking?: boolean;
+  isBusySpeakingAnswer?: boolean;
+  isStreaming?: boolean;
+  streamingText?: string;
   isGreeting?: boolean;
   greetingText?: string;
   onReplayGreeting?: () => void;
+  onDismissGreeting?: () => void;
   isVoicing?: boolean;
   mouthOpenLevel?: number;
+}
+
+export interface TextProsodyMetrics {
+  speedFactor: number;
+  amplitude: number;
+}
+
+export function analyzeProsodyFromText(text: string, isLiveStreamTail = false): TextProsodyMetrics {
+  const trimmed = (text || '').trimEnd();
+  if (!trimmed) {
+    return { speedFactor: 1.0, amplitude: 0.65 };
+  }
+
+  // 1. Comma / pause detection at the active tip (strongest during live streaming) or high punctuation density
+  const tailSlice = trimmed.slice(-6);
+  const endsWithCommaPause = /[,;:—–(\[]$/.test(tailSlice.slice(-2));
+  const endsWithSentencePause = /[.!?…]$/.test(tailSlice.slice(-1));
+
+  if (isLiveStreamTail && endsWithCommaPause) {
+    return { speedFactor: 0.42, amplitude: 0.26 };
+  }
+  if (isLiveStreamTail && endsWithSentencePause) {
+    return { speedFactor: 0.34, amplitude: 0.18 };
+  }
+
+  // 2. Analyze words in the active tail window
+  const windowText = trimmed.slice(-80);
+  const words = windowText.match(/[A-Za-zÀ-ÿ]+/g) || [];
+  const lastWord = words[words.length - 1] || '';
+  const recentWords = words.slice(-4);
+  const maxRecentLen = recentWords.reduce((m, w) => Math.max(m, w.length), 0);
+  const avgRecentLen =
+    recentWords.length > 0 ? recentWords.reduce((s, w) => s + w.length, 0) / recentWords.length : 0;
+
+  // For TTS snippet playback (non-streaming), gently blend comma density slowing with long-word acceleration
+  if (!isLiveStreamTail) {
+    const commaCount = (windowText.match(/[,;:—–]/g) || []).length;
+    if (endsWithCommaPause || (commaCount >= 2 && lastWord.length < 7)) {
+      return { speedFactor: 0.52, amplitude: 0.36 };
+    }
+  }
+
+  const effectiveLen = Math.max(lastWord.length, maxRecentLen * 0.9, avgRecentLen * 1.1);
+  if (effectiveLen >= 7) {
+    const longBoost = Math.min(1, (effectiveLen - 6) / 6);
+    return {
+      speedFactor: Number((1.15 + longBoost * 0.65).toFixed(2)),
+      amplitude: Number((0.72 + longBoost * 0.14).toFixed(2)),
+    };
+  }
+
+  return { speedFactor: 0.95, amplitude: 0.66 };
 }
 
 const themeColorMap = {
@@ -59,18 +115,115 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
   currentSpeechSnippet,
   thinkingCountdown,
   isThinking,
+  isBusySpeakingAnswer = false,
+  isStreaming = false,
+  streamingText = '',
   isGreeting = false,
   greetingText,
   onReplayGreeting,
+  onDismissGreeting,
   isVoicing = false,
   mouthOpenLevel = 0,
 }) => {
   const [blink, setBlink] = useState(false);
   const [isWaving, setIsWaving] = useState(false);
   const [clickCount, setClickCount] = useState(0);
+  const [prosodyMouthLevel, setProsodyMouthLevel] = useState(0);
 
   const colors = themeColorMap[theme] || themeColorMap.cyan;
   const isCurrentlyThinking = Boolean(isThinking) || state === 'thinking';
+  const hasActiveStreamText = Boolean(isStreaming && streamingText && streamingText.trim().length > 0);
+  const shouldDriveMouth = isVoicing || (state === 'speaking' && !isCurrentlyThinking) || hasActiveStreamText;
+
+  // Dynamic prosody refs (updated without restarting the animation frame loop so phase never snaps)
+  const targetSpeedRef = useRef<number>(1.0);
+  const targetAmplitudeRef = useRef<number>(0.66);
+  const lastStreamLenRef = useRef<number>(0);
+  const lastStreamUpdateAtRef = useRef<number>(0);
+  const isVoicingPropRef = useRef<boolean>(isVoicing);
+  const statePropRef = useRef<RobotState>(state);
+  const isStreamingPropRef = useRef<boolean>(Boolean(isStreaming));
+
+  isVoicingPropRef.current = isVoicing;
+  statePropRef.current = state;
+  isStreamingPropRef.current = Boolean(isStreaming);
+
+  useEffect(() => {
+    if (isStreaming && streamingText) {
+      if (streamingText.length !== lastStreamLenRef.current) {
+        lastStreamLenRef.current = streamingText.length;
+        lastStreamUpdateAtRef.current = performance.now();
+      }
+      const metrics = analyzeProsodyFromText(streamingText, true);
+      targetSpeedRef.current = metrics.speedFactor;
+      targetAmplitudeRef.current = metrics.amplitude;
+    } else {
+      lastStreamLenRef.current = 0;
+      const metrics = analyzeProsodyFromText(currentSpeechSnippet || '', false);
+      targetSpeedRef.current = metrics.speedFactor;
+      targetAmplitudeRef.current = metrics.amplitude;
+    }
+  }, [isStreaming, streamingText, currentSpeechSnippet]);
+
+  // Continuous phase-integrated prosody oscillator synchronized with TTS and streaming text
+  useEffect(() => {
+    if (!shouldDriveMouth) {
+      setProsodyMouthLevel(0);
+      return;
+    }
+
+    let rafId = 0;
+    let prevNow = performance.now();
+    let lastEmit = 0;
+    let phase = 0;
+    let smoothSpeed = targetSpeedRef.current;
+    let smoothAmp = targetAmplitudeRef.current;
+    let currentLevel = 0.14;
+
+    const tick = (now: number) => {
+      const dt = Math.min(0.08, Math.max(0.001, (now - prevNow) / 1000));
+      prevNow = now;
+
+      smoothSpeed += (targetSpeedRef.current - smoothSpeed) * 0.16;
+      smoothAmp += (targetAmplitudeRef.current - smoothAmp) * 0.18;
+
+      // Continuous phase accumulation guarantees smooth acceleration on long words and gentle slowing at commas
+      phase += dt * 9.6 * smoothSpeed;
+
+      // Fade out naturally if streaming pauses briefly without TTS voicing
+      let activityDrive = 1.0;
+      if (!isVoicingPropRef.current && statePropRef.current !== 'speaking' && isStreamingPropRef.current) {
+        const silenceAgeMs = now - lastStreamUpdateAtRef.current;
+        if (silenceAgeMs > 420) {
+          activityDrive = Math.max(0, 1 - (silenceAgeMs - 420) / 550);
+        }
+      }
+
+      const wave = 0.5 + 0.5 * Math.sin(phase);
+      const cadenceMod = 0.58 + 0.42 * Math.sin(phase * 0.63 + 0.7);
+      const targetLevel = (0.08 + smoothAmp * 0.72 * wave * cadenceMod) * activityDrive;
+      currentLevel += (targetLevel - currentLevel) * 0.34;
+
+      if (now - lastEmit >= 48) {
+        lastEmit = now;
+        setProsodyMouthLevel(currentLevel);
+      }
+
+      rafId = requestAnimationFrame(tick);
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [shouldDriveMouth]);
+
+  const effectiveMouthLevel =
+    isVoicing && mouthOpenLevel > 0.02
+      ? targetSpeedRef.current < 0.65
+        ? prosodyMouthLevel * 0.7 + mouthOpenLevel * 0.3
+        : mouthOpenLevel * 0.42 + prosodyMouthLevel * 0.58
+      : prosodyMouthLevel;
+
+  const isMouthAnimating = shouldDriveMouth && effectiveMouthLevel > 0.02;
 
   // Natural blinking effect
   useEffect(() => {
@@ -81,11 +234,15 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
     return () => clearInterval(blinkInterval);
   }, []);
 
-  const isBusy = isCurrentlyThinking || (state === 'speaking' && isVoicing) || Boolean(isThinking);
+  const isBusy = isCurrentlyThinking || Boolean(isBusySpeakingAnswer) || state === 'speaking' || isVoicing;
 
   const handleRobotClick = (e?: React.MouseEvent) => {
-    // Si le robot commence à réfléchir ou est en train de formuler une réponse, ignorer pour ne pas couper sa réflexion
-    if (isBusy) {
+    const nativeSynthActive =
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      (window.speechSynthesis.speaking || window.speechSynthesis.pending);
+
+    if (isBusy || nativeSynthActive) {
       e?.stopPropagation();
       return;
     }
@@ -219,19 +376,34 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
             </div>
 
             <div className="flex flex-col gap-2">
-              <div className="flex items-center gap-2">
-                <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/60 shadow-[0_0_12px_rgba(6,182,212,0.4)]">
-                  <span className="text-base select-none">👋</span>
-                  <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="relative flex items-center justify-center shrink-0 w-8 h-8 rounded-xl bg-cyan-500/20 border border-cyan-400/60 shadow-[0_0_12px_rgba(6,182,212,0.4)]">
+                    <span className="text-base select-none">👋</span>
+                    <span className="absolute -inset-0.5 rounded-xl bg-cyan-400/25 animate-ping pointer-events-none" />
+                  </div>
+                  <div className="flex flex-col min-w-0">
+                    <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight truncate">
+                      Bonjour et bienvenue !
+                    </span>
+                    <span className="text-[10px] text-cyan-300 font-mono truncate">
+                      SADIO vous salue chaleureusement
+                    </span>
+                  </div>
                 </div>
-                <div className="flex flex-col">
-                  <span className="font-bold text-xs sm:text-sm text-cyan-100 font-sans leading-tight">
-                    Bonjour et bienvenue !
-                  </span>
-                  <span className="text-[10px] text-cyan-300 font-mono">
-                    SADIO vous salue chaleureusement
-                  </span>
-                </div>
+                {onDismissGreeting && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDismissGreeting();
+                    }}
+                    aria-label="Fermer"
+                    className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
               </div>
 
               <p className="text-[11px] sm:text-xs text-slate-200 leading-snug font-sans">
@@ -260,6 +432,7 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
 
       {/* Center Standing Robot Canvas & SVG */}
       <div
+        data-robot-avatar="true"
         onClick={handleRobotClick}
         className={`relative flex-1 w-full max-w-[300px] xs:max-w-[340px] sm:max-w-[380px] md:max-w-[440px] lg:max-w-[480px] flex items-center justify-center group mt-0.5 ${
           isBusy ? 'cursor-default' : 'cursor-pointer'
@@ -320,6 +493,36 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
               <linearGradient id="cyberChassis" x1="0%" y1="0%" x2="0%" y2="100%">
                 <stop offset="0%" stopColor="#475569" />
                 <stop offset="100%" stopColor="#1e293b" />
+              </linearGradient>
+
+              <linearGradient id="mouthCavityGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#05070e" />
+                <stop offset="55%" stopColor="#140c18" />
+                <stop offset="100%" stopColor="#090d16" />
+              </linearGradient>
+
+              <radialGradient id="tongueGrad" cx="50%" cy="35%" r="65%">
+                <stop offset="0%" stopColor="#9d4261" />
+                <stop offset="65%" stopColor="#6b233d" />
+                <stop offset="100%" stopColor="#3b1021" />
+              </radialGradient>
+
+              <linearGradient id="upperToothEnamel" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#cbd5e1" />
+                <stop offset="28%" stopColor="#f1f5f9" />
+                <stop offset="78%" stopColor="#ffffff" />
+                <stop offset="100%" stopColor="#e2e8f0" />
+              </linearGradient>
+
+              <linearGradient id="lowerToothEnamel" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#dce4ef" />
+                <stop offset="45%" stopColor="#eef2f7" />
+                <stop offset="100%" stopColor="#94a3b8" />
+              </linearGradient>
+
+              <linearGradient id="upperLipCastShadow" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="#060911" stopOpacity="0.62" />
+                <stop offset="100%" stopColor="#060911" stopOpacity="0" />
               </linearGradient>
 
               <filter id="neonGlow" x="-30%" y="-30%" width="160%" height="160%">
@@ -428,85 +631,214 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
                 )}
               </g>
 
-              {/* Digital Voice Wave / Articulating Mouth Display Synchronized to Voice */}
-              {isVoicing && mouthOpenLevel > 0.02 ? (
-                <g filter="url(#neonGlow)">
-                  {/* Glowing Dark Oral Acoustic Chamber */}
-                  <path
-                    d={`M 110 94 Q 120 ${93 - mouthOpenLevel * 2.8} 130 94 Q 120 ${95 + mouthOpenLevel * 5.2} 110 94 Z`}
-                    fill="#040714"
-                    stroke={colors.primary}
-                    strokeWidth="1.2"
-                  />
-                  {/* Dynamic Equalizer Matrix inside mouth aperture */}
-                  <line
-                    x1="114"
-                    y1={94 - mouthOpenLevel * 1.5}
-                    x2="114"
-                    y2={94 + mouthOpenLevel * 2.8}
-                    stroke={colors.secondary}
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1="117"
-                    y1={94 - mouthOpenLevel * 2.2}
-                    x2="117"
-                    y2={94 + mouthOpenLevel * 3.8}
-                    stroke={colors.accent}
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1="120"
-                    y1={94 - mouthOpenLevel * 2.6}
-                    x2="120"
-                    y2={94 + mouthOpenLevel * 4.6}
-                    stroke="#ffffff"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1="123"
-                    y1={94 - mouthOpenLevel * 2.2}
-                    x2="123"
-                    y2={94 + mouthOpenLevel * 3.8}
-                    stroke={colors.accent}
-                    strokeWidth="1.6"
-                    strokeLinecap="round"
-                  />
-                  <line
-                    x1="126"
-                    y1={94 - mouthOpenLevel * 1.5}
-                    x2="126"
-                    y2={94 + mouthOpenLevel * 2.8}
-                    stroke={colors.secondary}
-                    strokeWidth="1.5"
-                    strokeLinecap="round"
-                  />
-                  {/* Upper articulating cyber lip */}
-                  <path
-                    d={`M 109 94 Q 120 ${93 - mouthOpenLevel * 3.0} 131 94`}
-                    stroke={colors.primary}
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                    fill="none"
-                  />
-                  {/* Lower articulating cyber lip */}
-                  <path
-                    d={`M 109 94 Q 120 ${95 + mouthOpenLevel * 5.4} 131 94`}
-                    stroke={colors.secondary}
-                    strokeWidth="2.2"
-                    strokeLinecap="round"
-                    fill="none"
-                  />
-                </g>
+              {/* Natural Gentle Talking Mouth with Realistic Teeth Visible Only When Open */}
+              {isMouthAnimating && effectiveMouthLevel > 0.02 ? (
+                (() => {
+                  const open = Math.min(1, Math.max(0, effectiveMouthLevel));
+                  const leftXNum = 110.2 + open * 1.4;
+                  const rightXNum = 129.8 - open * 1.4;
+                  const leftX = leftXNum.toFixed(2);
+                  const rightX = rightXNum.toFixed(2);
+                  const leftCtrlX = (leftXNum + 4.3).toFixed(2);
+                  const rightCtrlX = (rightXNum - 4.3).toFixed(2);
+                  const cornerY = (92.4 + open * 0.4).toFixed(2);
+                  const upperY = (92.4 - open * 1.35).toFixed(2);
+                  const lowerY = (93.8 + open * 5.8).toFixed(2);
+                  const mouthPath = `M ${leftX} ${cornerY} C ${leftCtrlX} ${upperY}, ${rightCtrlX} ${upperY}, ${rightX} ${cornerY} C ${rightCtrlX} ${lowerY}, ${leftCtrlX} ${lowerY}, ${leftX} ${cornerY} Z`;
+
+                  // Teeth appear strictly when the mouth actually opens, fading smoothly from closed lips
+                  const showUpperTeeth = open > 0.14;
+                  const showLowerTeeth = open > 0.26;
+                  const upperTeethOpacity = showUpperTeeth
+                    ? Math.min(0.97, (open - 0.14) / 0.2)
+                    : 0;
+                  const lowerTeethOpacity = showLowerTeeth
+                    ? Math.min(0.9, (open - 0.26) / 0.24)
+                    : 0;
+                  const upperJawDropY = (open - 0.14) * 0.35;
+                  const lowerJawDropY = (open - 0.26) * 2.3;
+                  const tongueY = (96.2 + open * 1.9).toFixed(2);
+                  const shadowHeight = (1.6 + open * 0.6).toFixed(2);
+
+                  return (
+                    <g>
+                      <defs>
+                        <clipPath id="robotMouthClip">
+                          <path d={mouthPath} />
+                        </clipPath>
+                      </defs>
+
+                      {/* Depth-shaded oral cavity, tongue & sculpted teeth clipped strictly to the open lips */}
+                      <g clipPath="url(#robotMouthClip)">
+                        <path d={mouthPath} fill="url(#mouthCavityGrad)" />
+
+                        {/* Subtle anatomical tongue visible inside wide mouth openings */}
+                        {open > 0.18 && (
+                          <g opacity={Math.min(0.85, (open - 0.18) * 1.35).toFixed(2)}>
+                            <ellipse cx="120" cy={tongueY} rx="6.8" ry="2.5" fill="url(#tongueGrad)" />
+                            <path
+                              d={`M 116.8 ${(Number(tongueY) - 0.4).toFixed(2)} Q 120 ${(Number(tongueY) + 0.35).toFixed(2)} 123.2 ${(Number(tongueY) - 0.4).toFixed(2)}`}
+                              stroke="#471327"
+                              strokeWidth="0.45"
+                              strokeLinecap="round"
+                              fill="none"
+                              opacity="0.6"
+                            />
+                          </g>
+                        )}
+
+                        {/* Realistic Upper Dental Arch (6 individual contoured teeth) */}
+                        {showUpperTeeth && (
+                          <g
+                            opacity={upperTeethOpacity.toFixed(2)}
+                            transform={`translate(0, ${upperJawDropY.toFixed(2)})`}
+                          >
+                            {/* Subtle upper gum shadow behind teeth */}
+                            <path
+                              d="M 111.5 89.2 Q 120 90.4 128.5 89.2 L 128.5 91.5 Q 120 92.1 111.5 91.5 Z"
+                              fill="#5b2135"
+                              opacity="0.7"
+                            />
+                            {/* Left canine */}
+                            <path
+                              d="M 112.4 89.6 L 114.55 89.6 L 114.5 92.3 Q 113.5 93.05 112.55 92.25 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Left lateral incisor */}
+                            <path
+                              d="M 114.68 89.6 L 117.02 89.6 L 116.95 92.65 Q 115.85 93.2 114.75 92.65 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Left central incisor */}
+                            <path
+                              d="M 117.14 89.6 L 119.92 89.6 L 119.86 92.95 Q 118.52 93.45 117.2 92.95 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Right central incisor */}
+                            <path
+                              d="M 120.08 89.6 L 122.86 89.6 L 122.8 92.95 Q 121.48 93.45 120.14 92.95 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Right lateral incisor */}
+                            <path
+                              d="M 122.98 89.6 L 125.32 89.6 L 125.25 92.65 Q 124.15 93.2 123.05 92.65 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Right canine */}
+                            <path
+                              d="M 125.45 89.6 L 127.6 89.6 L 127.45 92.25 Q 126.5 93.05 125.5 92.3 Z"
+                              fill="url(#upperToothEnamel)"
+                              stroke="#64748b"
+                              strokeWidth="0.22"
+                            />
+                            {/* Subtle enamel highlight across the front upper teeth */}
+                            <path
+                              d="M 115.2 91.4 Q 120 92.05 124.8 91.4"
+                              stroke="#ffffff"
+                              strokeWidth="0.55"
+                              strokeLinecap="round"
+                              fill="none"
+                              opacity="0.7"
+                            />
+                          </g>
+                        )}
+
+                        {/* Realistic Lower Dental Arch (slightly narrower & softly shaded in jaw depth) */}
+                        {showLowerTeeth && (
+                          <g
+                            opacity={lowerTeethOpacity.toFixed(2)}
+                            transform={`translate(0, ${lowerJawDropY.toFixed(2)})`}
+                          >
+                            {/* Left lower canine */}
+                            <path
+                              d="M 113.4 95.3 Q 114.2 94.75 115.05 95.35 L 115.1 98.4 L 113.35 98.4 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                            {/* Left lower lateral */}
+                            <path
+                              d="M 115.18 95.15 Q 116.25 94.75 117.32 95.15 L 117.35 98.5 L 115.15 98.5 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                            {/* Left lower central */}
+                            <path
+                              d="M 117.44 95.05 Q 118.68 94.72 119.92 95.05 L 119.92 98.6 L 117.44 98.6 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                            {/* Right lower central */}
+                            <path
+                              d="M 120.08 95.05 Q 121.32 94.72 122.56 95.05 L 122.56 98.6 L 120.08 98.6 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                            {/* Right lower lateral */}
+                            <path
+                              d="M 122.68 95.15 Q 123.75 94.75 124.82 95.15 L 124.85 98.5 L 122.65 98.5 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                            {/* Right lower canine */}
+                            <path
+                              d="M 124.95 95.35 Q 125.8 94.75 126.6 95.3 L 126.65 98.4 L 124.9 98.4 Z"
+                              fill="url(#lowerToothEnamel)"
+                              stroke="#475569"
+                              strokeWidth="0.2"
+                            />
+                          </g>
+                        )}
+
+                        {/* Soft upper-lip cast shadow inside top of mouth cavity */}
+                        <rect
+                          x="110"
+                          y="89.5"
+                          width="20"
+                          height={shadowHeight}
+                          fill="url(#upperLipCastShadow)"
+                        />
+                      </g>
+
+                      {/* Gentle upper lip */}
+                      <path
+                        d={`M ${leftX} ${cornerY} C ${leftCtrlX} ${upperY}, ${rightCtrlX} ${upperY}, ${rightX} ${cornerY}`}
+                        stroke={colors.primary}
+                        strokeWidth="1.75"
+                        strokeLinecap="round"
+                        fill="none"
+                      />
+                      {/* Gentle moving lower lip */}
+                      <path
+                        d={`M ${leftX} ${cornerY} C ${leftCtrlX} ${lowerY}, ${rightCtrlX} ${lowerY}, ${rightX} ${cornerY}`}
+                        stroke={colors.secondary}
+                        strokeWidth="1.85"
+                        strokeLinecap="round"
+                        fill="none"
+                      />
+                    </g>
+                  );
+                })()
               ) : isWaving || isGreeting ? (
                 // Cheerful warm smile mouth when waving / greeting
                 <path
-                  d="M 110 93 Q 120 100 130 93"
+                  d="M 109 92.5 Q 120 99 131 92.5"
                   stroke={colors.primary}
-                  strokeWidth="2.4"
+                  strokeWidth="2.1"
                   strokeLinecap="round"
                   fill="none"
                   filter="url(#neonGlow)"
@@ -514,9 +846,9 @@ export const StandingRobotAvatar: React.FC<StandingRobotAvatarProps> = ({
               ) : (
                 // Subtle static smiling digital line when silent, in between sentences or thinking
                 <path
-                  d="M 112 94 Q 120 97 128 94"
+                  d="M 110 93 Q 120 96.5 130 93"
                   stroke={colors.primary}
-                  strokeWidth="1.8"
+                  strokeWidth="1.9"
                   strokeLinecap="round"
                   opacity="0.85"
                   filter="url(#neonGlow)"

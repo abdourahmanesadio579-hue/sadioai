@@ -214,7 +214,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               return (
                 <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-2.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs text-slate-300 font-medium">Voix française de SADIO :</span>
+                    <span className="text-xs text-slate-300 font-medium">
+                      {language === 'en' ? "SADIO's English voice :" : 'Voix française de SADIO :'}
+                    </span>
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] text-cyan-400 font-mono px-2 py-0.5 rounded bg-cyan-950/80 border border-cyan-500/30">
                         {premiumVoices.length} premium / {availableVoices.length} total

@@ -8,8 +8,9 @@ import { SubscriptionModal } from './components/SubscriptionModal';
 import { DOMAINS } from './data/domains';
 import { ChatMessage, DomainCategory, RobotState, RobotTheme } from './types/chat';
 import { UserProfile, AccessStatus } from './types/auth';
-import { useSpeechSynthesis, cleanTextForSpeech, splitIntoSentences } from './hooks/useSpeechSynthesis';
+import { useSpeechSynthesis, cleanTextForSpeech, splitIntoSentences, hasSpeakableContent } from './hooks/useSpeechSynthesis';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
+import { useScreenWakeLock } from './hooks/useScreenWakeLock';
 import { safeStorage } from './utils/storage';
 import {
   Send,
@@ -31,7 +32,7 @@ import {
 } from 'lucide-react';
 import { processImageFile, formatFileSize, ProcessedImage } from './utils/imageCompressor';
 import { ChatMessageItem } from './components/ChatMessageItem';
-import { KaraokeReaderModal } from './components/KaraokeReaderModal';
+import { FormattedReaderModal } from './components/FormattedReaderModal';
 import { exportTextAsAudioPodcast } from './utils/audioPodcastExporter';
 import {
   Language,
@@ -61,9 +62,34 @@ function extractNextSpeechChunk(
   speechCaughtUp: boolean,
   inFlightCount: number
 ): { rawChunk: string; consumedLength: number; isHardFallback: boolean } | null {
-  if (!unparsed || unparsed.length < 12) return null;
+  if (!unparsed || unparsed.length < 10) return null;
 
-  const searchLimit = Math.min(unparsed.length, 340);
+  // Code fence handling: never slice mid-code-block (which feeds raw syntax/punctuation to TTS)
+  const fenceStart = unparsed.indexOf('```');
+  if (fenceStart !== -1) {
+    // If there is speakable prose before the code block, emit it cleanly right up to the fence
+    if (fenceStart > 0) {
+      const preFence = unparsed.slice(0, fenceStart);
+      if (hasSpeakableContent(preFence)) {
+        return { rawChunk: preFence, consumedLength: fenceStart, isHardFallback: false };
+      }
+    }
+    const fenceEnd = unparsed.indexOf('```', fenceStart + 3);
+    if (fenceEnd === -1) {
+      // Wait for closing code fence unless absurdly huge (> 3500 chars)
+      if (unparsed.length < 3500) {
+        return null;
+      }
+      return { rawChunk: unparsed, consumedLength: unparsed.length, isHardFallback: true };
+    }
+    let consumed = fenceEnd + 3;
+    while (consumed < unparsed.length && /\s/.test(unparsed[consumed])) {
+      consumed++;
+    }
+    return { rawChunk: unparsed.slice(0, consumed), consumedLength: consumed, isHardFallback: false };
+  }
+
+  const searchLimit = Math.min(unparsed.length, 320);
   const boundaries: number[] = [];
 
   for (let i = 0; i < searchLimit; i++) {
@@ -75,7 +101,7 @@ function extractNextSpeechChunk(
       while (endIdx < unparsed.length && /\s/.test(unparsed[endIdx])) {
         endIdx++;
       }
-      if (i >= 15) {
+      if (i >= 12) {
         boundaries.push(endIdx);
       }
       i = endIdx - 1;
@@ -152,7 +178,7 @@ function extractNextSpeechChunk(
         continue;
       }
 
-      if (afterPunct >= 12) {
+      if (afterPunct >= 10) {
         boundaries.push(consumed);
       }
       i = endPunct;
@@ -166,18 +192,18 @@ function extractNextSpeechChunk(
       return { rawChunk: unparsed.slice(0, cut), consumedLength: cut, isHardFallback: false };
     }
 
-    // Group as many complete sentences as fit cleanly under 220 chars
+    // Group complete sentences up to 155 chars (~7-9s max, fluid multi-sentence flow without pauses)
     let bestCut = boundaries[0];
     for (const b of boundaries) {
-      if (b <= 220) {
+      if (b <= 155) {
         bestCut = b;
       } else {
         break;
       }
     }
 
-    // 2. If playback caught up or nothing is currently playing/queued, flush immediately
-    if (speechCaughtUp || inFlightCount === 0) {
+    // 2. If playback caught up or queue is low, flush immediately so next chunk is ready cleanly
+    if (speechCaughtUp || inFlightCount <= 1) {
       return {
         rawChunk: unparsed.slice(0, bestCut),
         consumedLength: bestCut,
@@ -185,9 +211,8 @@ function extractNextSpeechChunk(
       };
     }
 
-    // 3. While audio is actively speaking, batch consecutive short sentences into ~150-220 char passages
-    // so the browser TTS engine reads across periods seamlessly with zero inter-sentence pauses.
-    if (bestCut < 150 && unparsed.length < 210) {
+    // 3. While audio is actively buffered, batch short sentences into ~95-155 char passages
+    if (bestCut < 95 && unparsed.length < 155) {
       return null;
     }
 
@@ -198,10 +223,9 @@ function extractNextSpeechChunk(
     };
   }
 
-  // Only if a giant unpunctuated run-on exceeds 420 chars with ZERO sentence punctuation:
-  // break at a safe clause boundary (never after 'à', 'de', "l'", etc.) and NEVER add a fake period.
-  if (unparsed.length > 420) {
-    for (let idx = 380; idx >= 180; idx--) {
+  // Long unpunctuated run-on (> 185 chars with no sentence end): split cleanly at clause/word boundary
+  if (unparsed.length > 185) {
+    for (let idx = Math.min(160, unparsed.length - 1); idx >= 75; idx--) {
       const ch = unparsed[idx];
       const nextCh = unparsed[idx + 1];
       if ((ch === ';' || ch === ':' || ch === ',' || ch === '\n') && (!nextCh || /\s/.test(nextCh))) {
@@ -217,12 +241,12 @@ function extractNextSpeechChunk(
       }
     }
 
-    // Extreme fallback: safe word boundary where left side doesn't end in dangling word/apostrophe
-    for (let idx = 360; idx >= 180; idx--) {
+    // Safe word boundary where left side doesn't end in dangling word/apostrophe
+    for (let idx = Math.min(160, unparsed.length - 1); idx >= 68; idx--) {
       if (/\s/.test(unparsed[idx])) {
         const left = unparsed.slice(0, idx).trim();
         const lastWord = (left.match(/([A-Za-zÀ-ÿ'’]+)$/)?.[1] || '').toLowerCase();
-        if (left.length >= 40 && !DANGLING_WORDS.has(lastWord) && !/['’]$/.test(left)) {
+        if (left.length >= 45 && !DANGLING_WORDS.has(lastWord) && !/['’]$/.test(left)) {
           let consumed = idx + 1;
           while (consumed < unparsed.length && /\s/.test(unparsed[consumed])) {
             consumed++;
@@ -279,6 +303,7 @@ export default function App() {
   const [chatErrorMessage, setChatErrorMessage] = useState<string | null>(null);
   const [isResponseCardDismissed, setIsResponseCardDismissed] = useState<boolean>(false);
   const [copiedResponse, setCopiedResponse] = useState<boolean>(false);
+  const lastFailedPromptRef = useRef<string | null>(null);
 
   // DeepSeek Primary Brain Key (Configurable directly from device)
   const [deepSeekKey, setDeepSeekKey] = useState<string>(() => {
@@ -367,24 +392,40 @@ export default function App() {
     }
   }, []);
 
-  // Check server health and API key presence on mount
+  // Check server health and API key presence on mount + re-warm on mobile tab return
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data) {
-          console.log('🤖 [SADIO DIAGNOSTIC SERVEUR] État des clés IA sur le serveur :', {
-            gemini: data.hasApiKey ? '✅ Active' : '❌ Absente',
-            deepseek: data.hasDeepSeekKey ? `✅ Active sur le serveur (${data.deepSeekKeyMasked})` : '❌ Absente des variables Render',
-          });
-          if (data.hasApiKey === false && data.hasDeepSeekKey === false) {
-            setChatErrorMessage(
-              "⚠️ Aucune clé IA détectée sur le serveur. Veuillez configurer DEEPSEEK_API_KEY ou GEMINI_API_KEY dans votre tableau de bord Render.com."
-            );
+    let warmupRetryTimer: number | null = null;
+    const warmHealth = (allowRetry = true) => {
+      fetch('/api/health', { cache: 'no-store' })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data) {
+            if (data.hasApiKey === false && data.hasDeepSeekKey === false) {
+              setChatErrorMessage(
+                "⚠️ Aucune clé IA détectée sur le serveur. Veuillez configurer DEEPSEEK_API_KEY ou GEMINI_API_KEY dans votre tableau de bord Render.com."
+              );
+            }
           }
-        }
-      })
-      .catch(() => {});
+        })
+        .catch(() => {
+          if (allowRetry) {
+            warmupRetryTimer = window.setTimeout(() => warmHealth(false), 2000);
+          }
+        });
+    };
+
+    warmHealth(true);
+
+    const handleVisibilityWarmup = () => {
+      if (document.visibilityState === 'visible') {
+        fetch('/api/health', { cache: 'no-store' }).catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityWarmup);
+    return () => {
+      if (warmupRetryTimer !== null) clearTimeout(warmupRetryTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityWarmup);
+    };
   }, []);
 
   // Handle Bictorys payment return URL (?payment_status=success or ?payment_status=cancel)
@@ -447,16 +488,11 @@ export default function App() {
     selectedVoice,
     setSelectedVoice,
     currentSentence,
-    currentSentenceIndex,
-    currentCharIndex,
-    currentSpokenWord,
-    currentWordIndex,
     speechError,
     startStreamingSpeech,
     enqueueStreamingSentence,
     finishStreamingSpeech,
     speak,
-    speakFromSentenceIndex,
     speakGreeting,
     pause: pauseSpeech,
     resume: resumeSpeech,
@@ -474,7 +510,37 @@ export default function App() {
     lang: TRANSLATIONS[language].speechRecognitionLang,
   });
 
+  // Prevent mobile screen sleep (e.g. 1-minute auto-lock) while SADIO is speaking, thinking, streaming, or listening
+  const keepScreenAwake =
+    isSpeaking ||
+    isVoicing ||
+    isStreaming ||
+    isThinking ||
+    isListening ||
+    Boolean(speakingMessageId) ||
+    robotState === 'speaking';
+  const { requestWakeLock } = useScreenWakeLock(keepScreenAwake);
+
   const handleLanguageChange = useCallback((newLang: Language) => {
+    // 1. Cancel any active network stream or pending response in the previous language
+    currentRequestIdRef.current += 1;
+    if (abortControllerRef.current) {
+      try {
+        abortControllerRef.current.abort();
+      } catch {
+        // ignore
+      }
+      abortControllerRef.current = null;
+    }
+    clearThinkingTimers();
+    setIsThinking(false);
+    setThinkingSeconds(null);
+    setIsStreaming(false);
+    setSpeakingMessageId(null);
+    currentAccumulatedTextRef.current = '';
+    isBusyThinkingOrRespondingRef.current = false;
+
+    // 2. Switch active language immediately
     languageRef.current = newLang;
     setLanguage(newLang);
     saveStoredLanguage(newLang);
@@ -483,7 +549,7 @@ export default function App() {
     greetingTriggeredRef.current = true;
     greetingAudioPlayedRef.current = true;
 
-    // Immediately stop any currently speaking voice in the previous language
+    // 3. Immediately stop any currently speaking voice in the previous language
     stopSpeech();
 
     // Update welcome message if still on initial welcome screen
@@ -505,24 +571,37 @@ export default function App() {
       });
     }
 
-    // If idle on the welcome screen with voice enabled, greet cleanly in the newly chosen language
-    if (isOnWelcomeOnly && voiceEnabled && !isBusyThinkingOrRespondingRef.current) {
+    // 4. Immediately confirm / greet vocally in the newly selected language
+    if (voiceEnabled) {
       unlockAudioContext();
-      setIsGreeting(true);
-      setRobotState('speaking');
+      if (isOnWelcomeOnly) {
+        setIsGreeting(true);
+      }
+      const spokenConfirmation = isOnWelcomeOnly
+        ? TRANSLATIONS[newLang].greeting.spoken
+        : newLang === 'en'
+        ? 'Language set to English. I will now answer in English.'
+        : 'Langue définie en français. Je vous réponds désormais en français.';
+
       try {
         speakGreeting(
-          TRANSLATIONS[newLang].greeting.spoken,
+          spokenConfirmation,
           () => {
             setRobotState('idle');
             setIsGreeting(false);
           },
-          newLang
+          newLang,
+          () => {
+            setRobotState('speaking');
+          }
         );
       } catch {
         setRobotState('idle');
         setIsGreeting(false);
       }
+    } else {
+      setIsGreeting(false);
+      setRobotState('idle');
     }
   }, [stopSpeech, voiceEnabled, unlockAudioContext, speakGreeting]);
 
@@ -534,52 +613,109 @@ export default function App() {
     if (!next) {
       stopSpeech();
     } else {
+      void requestWakeLock();
       speak(
         activeLang === 'en'
           ? "Voice enabled! I am SADIO, fully at your service."
-          : "Voix activée ! Je suis SADIO, entièrement à votre écoute."
+          : "Voix activée ! Je suis SADIO, entièrement à votre écoute.",
+        activeLang
       );
     }
-  }, [voiceEnabled, unlockAudioContext, setVoiceEnabled, stopSpeech, speak]);
+  }, [voiceEnabled, unlockAudioContext, setVoiceEnabled, stopSpeech, speak, requestWakeLock]);
 
   const triggerWarmGreeting = useCallback(
-    (forcePlayAudio = true, overrideLang?: Language) => {
-      // Si le robot est en train de réfléchir ou de répondre, ne jamais déclencher la salutation ni couper la réponse !
-      if (isBusyThinkingOrRespondingRef.current) {
+    (
+      forcePlayAudio = true,
+      overrideLang?: Language,
+      options?: { forceSpeak?: boolean; customText?: string }
+    ) => {
+      const nativeSynthActive =
+        typeof window !== 'undefined' &&
+        'speechSynthesis' in window &&
+        (window.speechSynthesis.speaking || window.speechSynthesis.pending);
+
+      // Si le robot est en train de réfléchir, diffuser, parler ou lire une réponse, ne jamais interrompre !
+      if (
+        nativeSynthActive ||
+        isThinking ||
+        isStreaming ||
+        isSpeaking ||
+        isVoicing ||
+        isSpeechPlayingRef.current ||
+        speakingMessageId ||
+        robotState === 'speaking' ||
+        isBusyThinkingOrRespondingRef.current
+      ) {
         return;
       }
 
       const activeLang = overrideLang || languageRef.current;
-      setIsGreeting(true);
+      const showGreetingCard = !options?.customText;
+      if (showGreetingCard) {
+        setIsGreeting(true);
+      }
       greetingTriggeredRef.current = true;
 
-      if (!voiceEnabled || !forcePlayAudio || typeof window === 'undefined' || !window.speechSynthesis) {
-        setTimeout(() => {
-          setIsGreeting(false);
-          setRobotState('idle');
-        }, 5000);
+      if (
+        (!voiceEnabled && !options?.forceSpeak) ||
+        !forcePlayAudio ||
+        typeof window === 'undefined' ||
+        !window.speechSynthesis
+      ) {
+        if (showGreetingCard) {
+          setTimeout(() => {
+            setIsGreeting(false);
+            setRobotState('idle');
+          }, 5000);
+        }
         return;
       }
 
+      if (options?.forceSpeak && !voiceEnabled) {
+        setVoiceEnabled(true);
+      }
+
       unlockAudioContext();
-      setRobotState('speaking');
+      const spokenText = options?.customText || TRANSLATIONS[activeLang].greeting.spoken;
 
       try {
         speakGreeting(
-          TRANSLATIONS[activeLang].greeting.spoken,
+          spokenText,
+          (didStart) => {
+            if (didStart) {
+              greetingAudioPlayedRef.current = true;
+            }
+            setRobotState('idle');
+            if (showGreetingCard) {
+              setIsGreeting(false);
+            }
+          },
+          activeLang,
           () => {
             greetingAudioPlayedRef.current = true;
-            setRobotState('idle');
-            setIsGreeting(false);
-          },
-          activeLang
+            setRobotState('speaking');
+          }
         );
       } catch {
         setRobotState('idle');
-        setIsGreeting(false);
+        if (showGreetingCard) {
+          setIsGreeting(false);
+        }
       }
     },
-    [voiceEnabled, speakGreeting, unlockAudioContext]
+    [
+      voiceEnabled,
+      setVoiceEnabled,
+      speakGreeting,
+      unlockAudioContext,
+      isThinking,
+      isStreaming,
+      isSpeaking,
+      isVoicing,
+      speakingMessageId,
+      robotState,
+      isSpeechPlayingRef,
+    ]
   );
 
   const triggerWarmGreetingRef = useRef(triggerWarmGreeting);
@@ -593,33 +729,50 @@ export default function App() {
       }
     }, 80);
 
-    // In emulators or mobile where autoplay is silenced by browser security,
-    // first user touch/click triggers the greeting speech in the currently active language
+    // On mobile/desktop where autoplay is blocked, the very first user click activates greeting speech.
+    // Note: listen on 'click' (not passive pointerdown/touchstart) so browser user-gesture activation is preserved.
     const handleImmediateGesture = (ev: Event) => {
       const target = ev.target as HTMLElement | null;
-      if (target?.closest?.('[data-no-auto-greet="true"]')) {
+      if (target?.closest?.('[data-no-auto-greet="true"]') || target?.closest?.('[data-robot-avatar="true"]')) {
         return;
       }
-      if (isBusyThinkingOrRespondingRef.current) {
+      if (isSpeechPlayingRef.current || isBusyThinkingOrRespondingRef.current || messagesRef.current.length > 1 || greetingAudioPlayedRef.current) {
         return;
       }
       unlockAudioContext();
-      if (!greetingAudioPlayedRef.current) {
-        triggerWarmGreetingRef.current(true);
-      }
+      triggerWarmGreetingRef.current(true, undefined, { forceSpeak: true });
     };
 
-    window.addEventListener('pointerdown', handleImmediateGesture, { passive: true });
-    window.addEventListener('touchstart', handleImmediateGesture, { passive: true });
-    window.addEventListener('click', handleImmediateGesture, { passive: true });
+    window.addEventListener('click', handleImmediateGesture);
 
     return () => {
       clearTimeout(autoGreetTimer);
-      window.removeEventListener('pointerdown', handleImmediateGesture);
-      window.removeEventListener('touchstart', handleImmediateGesture);
       window.removeEventListener('click', handleImmediateGesture);
     };
   }, [unlockAudioContext]);
+
+  // Safety guarantee: the greeting balloon near SADIO's head NEVER stays stuck after greeting finishes or stalls
+  useEffect(() => {
+    if (!isGreeting) return;
+
+    // Hard ceiling so a silent browser onend failure can never freeze the greeting balloon
+    const maxTimeout = window.setTimeout(() => {
+      setIsGreeting(false);
+    }, 9000);
+
+    // If speech is no longer active (e.g. already greeted or audio ended/blocked), dismiss cleanly
+    let idleTimeout: number | null = null;
+    if (!isSpeaking) {
+      idleTimeout = window.setTimeout(() => {
+        setIsGreeting(false);
+      }, greetingAudioPlayedRef.current ? 450 : 2400);
+    }
+
+    return () => {
+      clearTimeout(maxTimeout);
+      if (idleTimeout !== null) clearTimeout(idleTimeout);
+    };
+  }, [isGreeting, isSpeaking]);
 
   // Clean up any old chat history or old hide text flags in safeStorage so text displays cleanly
   useEffect(() => {
@@ -697,8 +850,9 @@ export default function App() {
     }
     currentAccumulatedTextRef.current = '';
 
-    // 5. Reset thinking & streaming states completely
+    // 5. Reset thinking, greeting & streaming states completely
     clearThinkingTimers();
+    setIsGreeting(false);
     setIsThinking(false);
     setThinkingSeconds(null);
     setIsStreaming(false);
@@ -787,6 +941,7 @@ export default function App() {
         : "Analyse cette image de manière complète, approfondie et détaillée. Décris tout ce que tu observes, identifie les éléments clés, retranscris et interprète les textes éventuels, et fournis une explication claire et structurée.");
 
     setChatErrorMessage(null);
+    lastFailedPromptRef.current = rawPrompt || null;
 
     // If subscription is strictly expired for an authenticated user, prompt renewal
     if (token && access && !access.hasAccess) {
@@ -812,6 +967,7 @@ export default function App() {
     greetingAudioPlayedRef.current = true;
     greetingTriggeredRef.current = true;
     isBusyThinkingOrRespondingRef.current = true;
+    void requestWakeLock();
 
     const requestId = ++currentRequestIdRef.current;
     const abortController = new AbortController();
@@ -878,7 +1034,7 @@ export default function App() {
 
         spokenCharIndex += extracted.consumedLength;
         const cleanSentence = cleanTextForSpeech(extracted.rawChunk, activeLang).trim();
-        if (cleanSentence.length > 0) {
+        if (hasSpeakableContent(cleanSentence)) {
           enqueueStreamingSentence(cleanSentence);
         }
       }
@@ -897,13 +1053,15 @@ export default function App() {
         },
         () => {
           pumpStreamingSpeech(true);
-        }
+        },
+        activeLang
       );
     }
 
     try {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
+        'x-sadio-stream-v2': '1',
       };
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
@@ -915,6 +1073,7 @@ export default function App() {
       }
 
       const payload = {
+        clientStreamV2: true,
         deepseekApiKey: deepSeekKey || undefined,
         language: activeLang,
         messages: newMessages.map((m) => ({
@@ -950,124 +1109,225 @@ export default function App() {
       const tFetchStart = performance.now();
       console.log(`⏱️ [SADIO LATENCE] [T2 = +${(tFetchStart - tStart).toFixed(0)} ms] Expédition requête POST /api/chat...`);
 
-      let response: Response;
-      try {
-        response = await fetch('/api/chat', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-          signal: abortController.signal,
-        });
-      } catch (networkErr) {
-        console.warn('⚠️ [SADIO WAKEUP] Tentative initiale échouée (réveil du serveur Render après inactivité). Nouvelle tentative dans 3s...');
-        setChatErrorMessage("⚠️ Réveil du serveur Render en cours (inactivité prolongée)... Patientez 3 secondes.");
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        setChatErrorMessage(null);
-
-        response = await fetch('/api/chat', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-          signal: abortController.signal,
-        });
-      }
-
-      const tHeadersReceived = performance.now();
-      const fetchTransitMs = (tHeadersReceived - tFetchStart).toFixed(0);
-      const totalToHeadersMs = (tHeadersReceived - tStart).toFixed(0);
-      console.log(
-        `⏱️ [SADIO LATENCE] [T3 = +${totalToHeadersMs} ms] En-têtes HTTP reçus ! Code: ${response.status} ${response.statusText}\n` +
-        `   • Temps aller-retour réseau + handshake : ${fetchTransitMs} ms`
-      );
-
-      if (currentRequestIdRef.current !== requestId) return;
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error("⚠️ Erreur 404 (/api/chat introuvable) : Sur Render.com, vous devez déployer ce projet en tant que Web Service (Node) et non comme Static Site. Assurez-vous que votre service utilise 'npm start' ou 'tsx server.ts' comme commande de démarrage.");
-        }
-        const errorData = await response.json().catch(() => ({}));
-        if (response.status === 401) {
-          setIsAuthModalOpen(true);
-        } else if (response.status === 403) {
-          setIsSubscriptionModalOpen(true);
-        }
-        throw new Error(errorData.message || errorData.error || `Erreur serveur (${response.status})`);
-      }
-
-      if (!response.body) {
-        throw new Error('Flux de réponse indisponible.');
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder('utf-8');
-      const tReaderReady = performance.now();
-      console.log(`⏱️ [SADIO LATENCE] [T4 = +${(tReaderReady - tStart).toFixed(0)} ms] Flux SSE ouvert. En attente du 1er paquet de tokens...`);
-
-      let buffer = '';
+      const MAX_CONNECT_RETRIES = 3;
+      const RETRY_DELAYS_MS = [900, 2000, 3500];
       let firstTokenLogged = false;
       let tFirstToken = 0;
       let tokenChunkCount = 0;
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done || currentRequestIdRef.current !== requestId) break;
+      for (let attempt = 0; attempt <= MAX_CONNECT_RETRIES; attempt++) {
+        if (currentRequestIdRef.current !== requestId || abortController.signal.aborted) return;
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || ''; // Keep incomplete trailing line
+        let response: Response;
+        try {
+          response = await fetch('/api/chat', {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: abortController.signal,
+          });
+        } catch (networkErr: any) {
+          if (networkErr?.name === 'AbortError' || abortController.signal.aborted) {
+            throw networkErr;
+          }
+          if (attempt < MAX_CONNECT_RETRIES) {
+            console.warn(
+              `⚠️ [SADIO WAKEUP] Tentative ${attempt + 1}/${MAX_CONNECT_RETRIES + 1} échouée (connexion/réveil serveur). Nouvelle tentative dans ${RETRY_DELAYS_MS[attempt]}ms...`
+            );
+            if (attempt >= 1) {
+              setChatErrorMessage(
+                activeLang === 'en'
+                  ? 'Waking up SADIO server... Please hold on.'
+                  : 'Connexion au serveur en cours... Nouvelle tentative automatique.'
+              );
+            }
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+            if (currentRequestIdRef.current === requestId) {
+              setChatErrorMessage(null);
+            }
+            continue;
+          }
+          throw networkErr;
+        }
 
-        for (const line of lines) {
-          if (currentRequestIdRef.current !== requestId) break;
+        const tHeadersReceived = performance.now();
+        const fetchTransitMs = (tHeadersReceived - tFetchStart).toFixed(0);
+        const totalToHeadersMs = (tHeadersReceived - tStart).toFixed(0);
+        console.log(
+          `⏱️ [SADIO LATENCE] [T3 = +${totalToHeadersMs} ms] En-têtes HTTP reçus ! Code: ${response.status} ${response.statusText}\n` +
+          `   • Temps aller-retour réseau + handshake : ${fetchTransitMs} ms`
+        );
 
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (data.brain) {
-                console.log(`🧠 [SADIO CERVEAU ACTIF] Réponse générée par : ${String(data.brain).toUpperCase()} (${data.model || ''})`);
-              }
-              if (data.brainFailover) {
-                console.warn(`⚠️ [SADIO FAILOVER DÉCLENCHÉ] Bascule serveur vers : ${String(data.target).toUpperCase()}`);
-              }
-              if (data.text) {
-                if (!firstTokenLogged) {
-                  firstTokenLogged = true;
-                  tFirstToken = performance.now();
-                  const ttftFromFetch = (tFirstToken - tFetchStart).toFixed(0);
-                  const ttftFromStart = (tFirstToken - tStart).toFixed(0);
-                  console.log(
-                    `🚀 [SADIO LATENCE] [T5 = +${ttftFromStart} ms] PREMIER TOKEN REÇU (TTFT) !\n` +
-                    `   ⏱️ Latence depuis expédition HTTP : ${ttftFromFetch} ms (TTFT)\n` +
-                    `   ⏱️ Latence totale depuis le clic : ${ttftFromStart} ms\n` +
-                    `   📝 Premier extrait : "${data.text.slice(0, 45).replace(/\n/g, ' ')}..."`
-                  );
-                }
-                tokenChunkCount++;
-                accumulatedText += data.text;
-                currentAccumulatedTextRef.current = accumulatedText;
-                if (currentRequestIdRef.current === requestId) {
-                  setStreamingContent(accumulatedText);
+        if (currentRequestIdRef.current !== requestId) return;
 
-                  // As soon as the first stream tokens arrive, end thinking indicator
-                  if (isThinking) {
-                    clearThinkingTimers();
-                    setIsThinking(false);
-                    setThinkingSeconds(null);
+        // Retry transparently on transient proxy/cold-start HTTP statuses (502/503/504/429)
+        const isTransientGatewayStatus = [408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524].includes(
+          response.status
+        );
+        if (isTransientGatewayStatus && attempt < MAX_CONNECT_RETRIES) {
+          console.warn(
+            `⚠️ [SADIO WAKEUP] Statut HTTP transitoire ${response.status} à la tentative ${attempt + 1}. Nouvelle tentative dans ${RETRY_DELAYS_MS[attempt]}ms...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+
+        if (!response.ok) {
+          if (response.status === 404) {
+            throw new Error("⚠️ Erreur 404 (/api/chat introuvable) : Sur Render.com, vous devez déployer ce projet en tant que Web Service (Node) et non comme Static Site. Assurez-vous que votre service utilise 'npm start' ou 'tsx server.ts' comme commande de démarrage.");
+          }
+          const errorData = await response.json().catch(() => ({}));
+          if (response.status === 401) {
+            setIsAuthModalOpen(true);
+          } else if (response.status === 403) {
+            setIsSubscriptionModalOpen(true);
+          }
+          throw new Error(errorData.message || errorData.error || `Erreur serveur (${response.status})`);
+        }
+
+        if (!response.body) {
+          if (attempt < MAX_CONNECT_RETRIES) {
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+            continue;
+          }
+          throw new Error('Flux de réponse indisponible.');
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        const tReaderReady = performance.now();
+        console.log(`⏱️ [SADIO LATENCE] [T4 = +${(tReaderReady - tStart).toFixed(0)} ms] Flux SSE ouvert. En attente du 1er paquet de tokens...`);
+
+        let buffer = '';
+        let shouldRetryEmptyStream = false;
+
+        try {
+          while (true) {
+            let readTimeoutId: number | null = null;
+            const { value, done } = await Promise.race([
+              reader.read(),
+              new Promise<never>((_, reject) => {
+                readTimeoutId = window.setTimeout(() => {
+                  reject(new Error('Stream stall timeout (>28s sans signal)'));
+                }, 28000);
+              }),
+            ]).finally(() => {
+              if (readTimeoutId !== null) clearTimeout(readTimeoutId);
+            });
+            if (done || currentRequestIdRef.current !== requestId) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || ''; // Keep incomplete trailing line
+
+            for (const line of lines) {
+              if (currentRequestIdRef.current !== requestId) break;
+
+              if (line.startsWith('data: ')) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+                  if (data.brain) {
+                    console.log(`🧠 [SADIO CERVEAU ACTIF] Réponse générée par : ${String(data.brain).toUpperCase()} (${data.model || ''})`);
                   }
+                  if (data.brainFailover) {
+                    console.warn(`⚠️ [SADIO FAILOVER DÉCLENCHÉ] Bascule serveur vers : ${String(data.target).toUpperCase()}`);
+                  }
+                  if (data.resetText) {
+                    accumulatedText = '';
+                    currentAccumulatedTextRef.current = '';
+                    spokenCharIndex = 0;
+                    firstTokenLogged = false;
+                    tokenChunkCount = 0;
+                    setStreamingContent('');
+                    continue;
+                  }
+                  if (data.transientError) {
+                    if (attempt < MAX_CONNECT_RETRIES) {
+                      shouldRetryEmptyStream = true;
+                      break;
+                    }
+                    throw new Error(
+                      data.error ||
+                        (activeLang === 'en'
+                          ? 'Temporary network slowdown. Please try again.'
+                          : 'Ralentissement réseau momentané. Veuillez réessayer.')
+                    );
+                  }
+                  if (data.text) {
+                    if (!firstTokenLogged) {
+                      firstTokenLogged = true;
+                      tFirstToken = performance.now();
+                      const ttftFromFetch = (tFirstToken - tFetchStart).toFixed(0);
+                      const ttftFromStart = (tFirstToken - tStart).toFixed(0);
+                      console.log(
+                        `🚀 [SADIO LATENCE] [T5 = +${ttftFromStart} ms] PREMIER TOKEN REÇU (TTFT) !\n` +
+                        `   ⏱️ Latence depuis expédition HTTP : ${ttftFromFetch} ms (TTFT)\n` +
+                        `   ⏱️ Latence totale depuis le clic : ${ttftFromStart} ms\n` +
+                        `   📝 Premier extrait : "${data.text.slice(0, 45).replace(/\n/g, ' ')}..."`
+                      );
+                    }
+                    tokenChunkCount++;
+                    accumulatedText += data.text;
+                    currentAccumulatedTextRef.current = accumulatedText;
+                    if (currentRequestIdRef.current === requestId) {
+                      setStreamingContent(accumulatedText);
 
-                  // Queue complete natural sentences/passages into speech queue
-                  pumpStreamingSpeech(false);
+                      // As soon as the first stream tokens arrive, end thinking indicator
+                      if (isThinking) {
+                        clearThinkingTimers();
+                        setIsThinking(false);
+                        setThinkingSeconds(null);
+                      }
+
+                      // Queue complete natural sentences/passages into speech queue
+                      pumpStreamingSpeech(false);
+                    }
+                  }
+                  if (data.error && !data.transientError && currentRequestIdRef.current === requestId) {
+                    accumulatedText += `\n\n${data.error}`;
+                    setStreamingContent(accumulatedText);
+                  }
+                } catch (parseOrStreamErr: any) {
+                  if (parseOrStreamErr?.message && !String(parseOrStreamErr.message).includes('JSON')) {
+                    throw parseOrStreamErr;
+                  }
                 }
               }
-              if (data.error && currentRequestIdRef.current === requestId) {
-                accumulatedText += `\n\n${data.error}`;
-                setStreamingContent(accumulatedText);
+            }
+            if (shouldRetryEmptyStream) {
+              try {
+                await reader.cancel();
+              } catch {
+                // ignore
               }
-            } catch (err) {
-              // Ignore partial JSON
+              break;
             }
           }
+        } catch (streamErr: any) {
+          if (streamErr?.name === 'AbortError' || abortController.signal.aborted) {
+            throw streamErr;
+          }
+          // If stream broke on mobile before a single token arrived, retry cleanly!
+          if (!firstTokenLogged && attempt < MAX_CONNECT_RETRIES) {
+            shouldRetryEmptyStream = true;
+          } else if (!firstTokenLogged) {
+            throw streamErr;
+          } else {
+            console.warn('⚠️ [SADIO STREAM] Fin anticipée après réception partielle:', streamErr?.message || streamErr);
+          }
         }
+
+        if (!shouldRetryEmptyStream && !firstTokenLogged && attempt < MAX_CONNECT_RETRIES && currentRequestIdRef.current === requestId) {
+          shouldRetryEmptyStream = true;
+        }
+
+        if (shouldRetryEmptyStream) {
+          console.warn(`⚠️ [SADIO WAKEUP] Flux fermé avant réception de texte (tentative ${attempt + 1}). Reconnexion automatique...`);
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt]));
+          continue;
+        }
+
+        break;
       }
 
       if (currentRequestIdRef.current !== requestId) return;
@@ -1107,6 +1367,7 @@ export default function App() {
       });
       setStreamingContent('');
       currentAccumulatedTextRef.current = '';
+      lastFailedPromptRef.current = null;
 
       // If guest used their discovery demo question, persist count
       if (!token) {
@@ -1121,30 +1382,30 @@ export default function App() {
         setSpeakingMessageId(botMessageId);
         const remaining = accumulatedText.slice(spokenCharIndex).trim();
         if (remaining) {
-          const tailPassages = splitIntoSentences(remaining, 230);
-          if (tailPassages.length > 0) {
-            for (const tail of tailPassages) {
-              const cleanedTail = cleanTextForSpeech(tail, activeLang).trim();
-              if (cleanedTail.length >= 2) {
-                enqueueStreamingSentence(cleanedTail);
+          const cleanedRemaining = cleanTextForSpeech(remaining, activeLang).trim();
+          if (hasSpeakableContent(cleanedRemaining)) {
+            const tailPassages = splitIntoSentences(cleanedRemaining, 155);
+            if (tailPassages.length > 0) {
+              for (const tail of tailPassages) {
+                if (hasSpeakableContent(tail)) {
+                  enqueueStreamingSentence(tail);
+                }
               }
-            }
-          } else {
-            const cleanedTail = cleanTextForSpeech(remaining, activeLang).trim();
-            if (cleanedTail.length >= 2) {
-              enqueueStreamingSentence(cleanedTail);
+            } else {
+              enqueueStreamingSentence(cleanedRemaining);
             }
           }
         }
 
         let callbackFired = false;
+        const safetyTimeoutMs = Math.max(120000, accumulatedText.length * 180 + 45000);
         const safetyTimer = setTimeout(() => {
           if (!callbackFired && currentRequestIdRef.current === requestId) {
             callbackFired = true;
             setSpeakingMessageId(null);
             setRobotState('idle');
           }
-        }, 60000);
+        }, safetyTimeoutMs);
 
         finishStreamingSpeech(undefined, () => {
           if (!callbackFired && currentRequestIdRef.current === requestId) {
@@ -1225,12 +1486,40 @@ export default function App() {
   };
 
   const handleAvatarInteractiveClick = () => {
-    // Si le robot est en pleine réflexion ou en train de répondre, ignorer tout contact tactile
-    if (isBusyThinkingOrRespondingRef.current) {
+    const nativeSynthActive =
+      typeof window !== 'undefined' &&
+      'speechSynthesis' in window &&
+      (window.speechSynthesis.speaking || window.speechSynthesis.pending);
+
+    // Ignorer strictement si SADIO réfléchit, génère, parle ou lit une réponse en cours
+    if (
+      nativeSynthActive ||
+      isThinking ||
+      isStreaming ||
+      isSpeaking ||
+      isVoicing ||
+      isSpeechPlayingRef.current ||
+      Boolean(speakingMessageId) ||
+      robotState === 'speaking' ||
+      isBusyThinkingOrRespondingRef.current
+    ) {
       return;
     }
     unlockAudioContext();
-    triggerWarmGreeting(true);
+    void requestWakeLock();
+    const activeLang = languageRef.current;
+    const hasAlreadyGreetedOrChatted =
+      (messagesRef.current.length > 1 || greetingAudioPlayedRef.current);
+    const touchReply = hasAlreadyGreetedOrChatted
+      ? activeLang === 'en'
+        ? "Yes, I am listening! Ask me your next question, I am ready to answer."
+        : "Oui, je suis là et à votre écoute ! Posez-moi votre prochaine question, je suis prêt à vous répondre."
+      : undefined;
+
+    triggerWarmGreeting(true, activeLang, {
+      forceSpeak: true,
+      customText: touchReply,
+    });
   };
 
   // RENDER: Reusable Chat Input Bar
@@ -1277,6 +1566,10 @@ export default function App() {
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={() => {
+                // Pre-warm mobile TLS & backend connection while user starts typing
+                fetch('/api/health', { cache: 'no-store' }).catch(() => {});
+              }}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={
@@ -1411,6 +1704,21 @@ export default function App() {
                     • Start Command : <code>npm start</code>
                   </div>
                 )}
+                {lastFailedPromptRef.current && !isStreaming && !isThinking && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const retryPrompt = lastFailedPromptRef.current;
+                      if (retryPrompt) {
+                        setChatErrorMessage(null);
+                        void handleSendMessage(retryPrompt);
+                      }
+                    }}
+                    className="mt-2 px-3 py-1 rounded-lg bg-cyan-500/20 border border-cyan-400/50 text-cyan-200 text-[11px] font-semibold hover:bg-cyan-500/30 transition active:scale-95"
+                  >
+                    {language === 'en' ? 'Retry now' : 'Réessayer maintenant'}
+                  </button>
+                )}
               </div>
               <button
                 onClick={() => setChatErrorMessage(null)}
@@ -1454,10 +1762,14 @@ export default function App() {
               theme={theme}
               onAvatarClick={handleAvatarInteractiveClick}
               isThinking={isThinking}
+              isBusySpeakingAnswer={Boolean(speakingMessageId) || isStreaming || isSpeaking || isVoicing}
+              isStreaming={isStreaming}
+              streamingText={streamingContent}
               thinkingCountdown={isThinking ? thinkingSeconds : null}
-              isGreeting={Boolean(isGreeting && !isBusyThinkingOrRespondingRef.current)}
-              greetingText="« Bonjour et bienvenue ! C'est un réel plaisir de vous accueillir. Je me tiens debout au centre de votre écran, entièrement prêt pour vos questions ! »"
-              onReplayGreeting={() => triggerWarmGreeting(true)}
+              isGreeting={Boolean(isGreeting && !isThinking && !isStreaming && !speakingMessageId)}
+              greetingText={TRANSLATIONS[language].greeting.spoken}
+              onReplayGreeting={() => triggerWarmGreeting(true, languageRef.current, { forceSpeak: true })}
+              onDismissGreeting={() => setIsGreeting(false)}
               isVoicing={isVoicing}
               mouthOpenLevel={mouthOpenLevel}
               currentSpeechSnippet={
@@ -1567,7 +1879,17 @@ export default function App() {
                       type="button"
                       onClick={() => {
                         unlockAudioContext();
-                        speak(activeAnswerText);
+                        void requestWakeLock();
+                        const msgId = latestBotMessage?.id || 'replay-answer';
+                        setIsGreeting(false);
+                        setSpeakingMessageId(msgId);
+                        setRobotState('speaking');
+                        isBusyThinkingOrRespondingRef.current = true;
+                        speak(activeAnswerText, languageRef.current, () => {
+                          setSpeakingMessageId((curr) => (curr === msgId ? null : curr));
+                          setRobotState('idle');
+                          isBusyThinkingOrRespondingRef.current = false;
+                        });
                       }}
                       className="p-1.5 rounded-xl bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 hover:bg-cyan-500/30 transition active:scale-95 shadow-sm"
                       title={language === 'fr' ? "Écouter la voix de SADIO" : "Listen to SADIO's voice"}
@@ -1624,24 +1946,25 @@ export default function App() {
             </div>
           )}
 
-          {/* Full Text Modal avec Suivi Karaoké en temps réel (Proposition 1 intégrée) */}
-          <KaraokeReaderModal
+          {/* Full Text Modal en affichage Formaté */}
+          <FormattedReaderModal
             isOpen={showFullTextModal && hasAnswerToShow}
             onClose={() => setShowFullTextModal(false)}
             fullText={activeAnswerText}
             isSpeaking={isSpeaking}
-            currentSentence={currentSentence}
-            currentSentenceIndex={currentSentenceIndex}
-            currentWordIndex={currentWordIndex}
-            currentSpokenWord={currentSpokenWord}
-            currentCharIndex={currentCharIndex}
             onSpeak={(text) => {
               unlockAudioContext();
-              speak(text, undefined, undefined, true);
-            }}
-            onSpeakFromSentence={(sentenceIdx) => {
-              unlockAudioContext();
-              speakFromSentenceIndex(sentenceIdx, activeAnswerText);
+              void requestWakeLock();
+              const msgId = latestBotMessage?.id || 'replay-answer';
+              setIsGreeting(false);
+              setSpeakingMessageId(msgId);
+              setRobotState('speaking');
+              isBusyThinkingOrRespondingRef.current = true;
+              speak(text, languageRef.current, () => {
+                setSpeakingMessageId((curr) => (curr === msgId ? null : curr));
+                setRobotState('idle');
+                isBusyThinkingOrRespondingRef.current = false;
+              });
             }}
             onStop={handleStop}
             isStreaming={isStreaming}

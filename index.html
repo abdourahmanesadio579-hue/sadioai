@@ -61,8 +61,19 @@
       </div>
     </div>
     <script>
-      // Unregister stale dev service workers and clear old caches so code updates take effect immediately
+      // Unregister stale dev service workers and immediately activate updated production SWs on phones
       if ('serviceWorker' in navigator) {
+        var refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', function() {
+          if (refreshing) return;
+          try {
+            if (sessionStorage.getItem('sadio_sw_reloaded') === '1') return;
+            sessionStorage.setItem('sadio_sw_reloaded', '1');
+          } catch (e) {}
+          refreshing = true;
+          window.location.reload();
+        });
+
         navigator.serviceWorker.getRegistrations().then(function(regs) {
           for (var i = 0; i < regs.length; i++) {
             var swUrl = (regs[i].active && regs[i].active.scriptURL) || (regs[i].waiting && regs[i].waiting.scriptURL) || '';
